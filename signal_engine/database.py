@@ -2,12 +2,11 @@ from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker, declarative_base
 from .config import settings
 
-# Convertir DATABASE_URL de postgresql:// a postgresql+asyncpg://
 async_db_url = settings.DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://")
 
 engine = create_async_engine(
     async_db_url,
-    echo=False,  # Cambiar a True para ver SQL en desarrollo
+    echo=False, 
     pool_size=5,
     max_overflow=10
 )
