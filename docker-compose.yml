@@ -1,0 +1,12 @@
+version: "3.8"
+
+services:
+  signal-engine:
+    build: .
+    ports:
+      - "8000:8000" # API
+      - "9001:9001" # WebSocket
+    env_file:
+      - .env
+    restart: unless-stopped
+    # No necesita volumen para base de datos; todo está en Supabase
