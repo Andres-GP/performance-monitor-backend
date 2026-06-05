@@ -1,7 +1,8 @@
 import asyncio
 import json
-from typing import Dict, Set
-from picows import ws_create_server, WSListener, WSTransport, WSFrame, WSMsgType
+import websockets
+from websockets.server import WebSocketServerProtocol
+from typing import Dict, Callable
 from .utils.logger import setup_logger
 from .risk_manager import RiskManager
 from .config import settings
@@ -9,105 +10,105 @@ from .config import settings
 logger = setup_logger(__name__)
 
 class BridgeConnection:
-    """Representa un bridge conectado (NT8 o MT5)"""
-    def __init__(self, transport: WSTransport, platform: str):
-        self.transport = transport
+    def __init__(self, websocket: WebSocketServerProtocol, platform: str = "unknown"):
+        self.websocket = websocket
         self.platform = platform
         self.is_authenticated = False
 
-class SignalEngineWSListener(WSListener):
+class WebSocketServer:
     def __init__(self, risk_manager: RiskManager):
-        super().__init__()
-        self.connections: Dict[WSTransport, BridgeConnection] = {}
+        self.connections: Dict[WebSocketServerProtocol, BridgeConnection] = {}
         self.risk_manager = risk_manager
-        self.order_callbacks = []  # para notificar a la API/DB
-    
-    def on_ws_connected(self, transport: WSTransport):
-        logger.info(f"Nuevo bridge conectado desde {transport.get_remote_addr()}")
-        # Temporalmente sin autenticar, esperamos primer mensaje con identificación
-        self.connections[transport] = BridgeConnection(transport, platform="unknown")
-    
-    def on_ws_frame(self, transport: WSTransport, frame: WSFrame):
-        if frame.msg_type == WSMsgType.TEXT:
-            try:
-                msg = json.loads(frame.get_payload_as_ascii_text())
-                self._handle_message(transport, msg)
-            except Exception as e:
-                logger.error(f"Error procesando mensaje: {e}")
-                self._send_error(transport, "Invalid JSON")
-        elif frame.msg_type == WSMsgType.CLOSE:
-            self.on_ws_disconnected(transport)
-    
-    def _handle_message(self, transport: WSTransport, msg: dict):
-        conn = self.connections.get(transport)
+        self.order_callbacks: list = []
+
+    async def handle_connection(self, websocket: WebSocketServerProtocol, path: str):
+        conn = BridgeConnection(websocket)
+        self.connections[websocket] = conn
+        logger.info(f"Bridge conectado desde {websocket.remote_address} (path: {path})")
+        
+        try:
+            async for message in websocket:
+                await self._handle_message(websocket, message)
+        except websockets.exceptions.ConnectionClosed:
+            logger.info(f"Bridge desconectado: {conn.platform}")
+        finally:
+            self.connections.pop(websocket, None)
+
+    async def _handle_message(self, websocket: WebSocketServerProtocol, message: str):
+        conn = self.connections.get(websocket)
         if not conn:
             return
         
-        msg_type = msg.get("type")
-        
-        if msg_type == "auth":
-            # autenticación simple (token)
-            token = msg.get("token", "")
-            if token == settings.API_SECRET_KEY:
-                conn.is_authenticated = True
-                conn.platform = msg.get("platform", "unknown")
-                self._send(transport, {"type": "auth_ok"})
-                logger.info(f"Bridge autenticado: {conn.platform}")
+        try:
+            msg = json.loads(message)
+            msg_type = msg.get("type")
+            
+            if msg_type == "auth":
+                token = msg.get("token", "")
+                if token == settings.API_SECRET_KEY:
+                    conn.is_authenticated = True
+                    conn.platform = msg.get("platform", "unknown")
+                    await websocket.send(json.dumps({"type": "auth_ok"}))
+                    logger.info(f"Bridge autenticado: {conn.platform}")
+                else:
+                    await websocket.send(json.dumps({"type": "auth_error", "reason": "Invalid token"}))
+                    await websocket.close()
+            
+            elif msg_type == "order_update":
+                if conn.is_authenticated:
+                    logger.info(f"Order update from {conn.platform}: {msg}")
+                    for cb in self.order_callbacks:
+                        cb(msg)
+                    await websocket.send(json.dumps({"type": "update_received", "status": "ok"}))
+            
+            elif msg_type == "position_snapshot":
+                if conn.is_authenticated:
+                    logger.info(f"Position snapshot from {conn.platform}")
+                    await websocket.send(json.dumps({"type": "snapshot_received", "status": "ok"}))
+            
             else:
-                self._send(transport, {"type": "auth_error", "reason": "Invalid token"})
-                transport.disconnect()
-        
-        elif msg_type == "order_update":
-            # Actualización de estado de orden desde el bridge (confirmación)
-            if conn.is_authenticated:
-                logger.info(f"Order update from {conn.platform}: {msg}")
-                # Aquí podrías guardar en DB y notificar a API
-                # Llamar callbacks registrados
-                for cb in self.order_callbacks:
-                    cb(msg)
-                self._send(transport, {"type": "update_received", "status": "ok"})
-        
-        elif msg_type == "position_snapshot":
-            # Envío de posiciones actuales (por si se desincroniza)
-            logger.info(f"Position snapshot from {conn.platform}")
-            # Actualizar estado interno
-        
-        else:
-            logger.warning(f"Mensaje desconocido: {msg_type}")
-    
-    def on_ws_disconnected(self, transport: WSTransport):
-        if transport in self.connections:
-            logger.info(f"Bridge desconectado: {self.connections[transport].platform}")
-            del self.connections[transport]
-    
-    def _send(self, transport: WSTransport, data: dict):
-        transport.send_text(json.dumps(data))
-    
-    def _send_error(self, transport: WSTransport, reason: str):
-        self._send(transport, {"type": "error", "reason": reason})
-    
+                logger.warning(f"Mensaje desconocido: {msg_type}")
+                
+        except json.JSONDecodeError:
+            logger.error("Mensaje no válido (JSON inválido)")
+            await websocket.send(json.dumps({"type": "error", "reason": "Invalid JSON"}))
+        except Exception as e:
+            logger.error(f"Error procesando mensaje: {e}")
+            await websocket.send(json.dumps({"type": "error", "reason": str(e)}))
+
     async def send_order_to_bridge(self, platform: str, order: dict) -> bool:
-        """Envía una orden al bridge de la plataforma especificada"""
-        for transport, conn in self.connections.items():
+        for websocket, conn in self.connections.items():
             if conn.platform == platform and conn.is_authenticated:
-                self._send(transport, {
-                    "type": "execute_order",
-                    "order": order
-                })
-                logger.info(f"Orden enviada a {platform}: {order}")
-                return True
+                try:
+                    await websocket.send(json.dumps({
+                        "type": "execute_order",
+                        "order": order
+                    }))
+                    logger.info(f"Orden enviada a {platform}: {order}")
+                    return True
+                except Exception as e:
+                    logger.error(f"Error enviando orden a {platform}: {e}")
+                    return False
         logger.error(f"No hay bridge conectado para {platform}")
         return False
-    
-    def register_order_callback(self, callback):
+
+    def register_order_callback(self, callback: Callable):
         self.order_callbacks.append(callback)
 
 async def start_websocket_server(risk_manager: RiskManager):
-    listener = SignalEngineWSListener(risk_manager)
-    server = await ws_create_server(
-        lambda: listener,
+    ws_server = WebSocketServer(risk_manager)
+    
+    # Handler con un solo argumento (websocket) según la API moderna de websockets
+    async def handler(websocket):
+        # Obtener path del atributo del websocket (disponible en versiones recientes)
+        path = websocket.path if hasattr(websocket, 'path') else ""
+        await ws_server.handle_connection(websocket, path)
+    
+    server = await websockets.serve(
+        handler,
         settings.HOST,
-        settings.WEBSOCKET_PORT
+        settings.WEBSOCKET_PORT,
+        compression=None
     )
     logger.info(f"WebSocket server listening on {settings.HOST}:{settings.WEBSOCKET_PORT}")
-    return server, listener
+    return server, ws_server

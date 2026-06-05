@@ -1,8 +1,4 @@
 #!/usr/bin/env python3
-"""
-Simula un bridge (NT8 o MT5) conectándose al Signal Engine.
-Para pruebas.
-"""
 import asyncio
 import json
 import websockets
@@ -13,7 +9,7 @@ async def fake_bridge():
         # Enviar autenticación
         await websocket.send(json.dumps({
             "type": "auth",
-            "token": "tu-super-secret-key-cambia-esto",
+            "token": "6d84e658780b073a7a66643135247494094bb63d0474b558c55fe002ce296920",  # cámbialo por tu API_SECRET_KEY
             "platform": "SIMULATED_BRIDGE"
         }))
         response = await websocket.recv()
@@ -24,7 +20,7 @@ async def fake_bridge():
             data = json.loads(message)
             print(f"Received order: {data}")
             if data.get("type") == "execute_order":
-                # Simular ejecución y enviar confirmación
+                # Simular ejecución
                 await websocket.send(json.dumps({
                     "type": "order_update",
                     "status": "filled",

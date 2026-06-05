@@ -6,25 +6,18 @@ from .risk_manager import RiskManager
 from .websocket_server import start_websocket_server
 from .strategies.engine import StrategyEngine
 from .api import create_app
-from .database import engine, Base
 
 logger = setup_logger(__name__)
 
-async def init_db():
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-
 async def main():
-    await init_db()
-
     risk_manager = RiskManager()
-
-    ws_server, ws_listener = await start_websocket_server(risk_manager)
-
-    strategy_engine = StrategyEngine(ws_listener, risk_manager)
+    # start_websocket_server retorna (server_asyncio, ws_server_object)
+    _, ws_engine = await start_websocket_server(risk_manager)
+    
+    strategy_engine = StrategyEngine(ws_engine, risk_manager)
     await strategy_engine.start()
-
-    app = create_app(ws_listener, risk_manager)
+    
+    app = create_app(ws_engine, risk_manager)
     
     config = uvicorn.Config(
         app,
@@ -34,14 +27,12 @@ async def main():
         loop="uvloop"
     )
     server = uvicorn.Server(config)
-    
     api_task = asyncio.create_task(server.serve())
     
-    logger.info(f"Signal Engine fully started. WebSocket on {settings.WEBSOCKET_PORT}, API on {settings.API_PORT}")
+    logger.info(f"Signal Engine fully started. WebSocket on {settings.HOST}:{settings.WEBSOCKET_PORT}, API on {settings.API_PORT}")
     
     await api_task
-    ws_server.close()
-    strategy_engine.active = False
+    # No cerramos el WebSocket server explícitamente aquí, pero se puede añadir limpieza si es necesario
 
 if __name__ == "__main__":
     asyncio.run(main())
