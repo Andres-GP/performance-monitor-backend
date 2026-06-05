@@ -9,7 +9,7 @@ async def fake_bridge():
         # Enviar autenticación
         await websocket.send(json.dumps({
             "type": "auth",
-            "token": "6d84e658780b073a7a66643135247494094bb63d0474b558c55fe002ce296920",  # cámbialo por tu API_SECRET_KEY
+            "token": "",  # cámbialo por tu API_SECRET_KEY
             "platform": "SIMULATED_BRIDGE"
         }))
         response = await websocket.recv()
