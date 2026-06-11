@@ -1,10 +1,12 @@
+from typing import Any, Dict, Optional
+
 from pydantic import BaseModel
-from typing import Dict, Any, Optional
-from datetime import datetime
+
 
 class StrategyConfigUpdate(BaseModel):
     params: Dict[str, Any]
     is_active: Optional[bool] = None
+
 
 class ManualOrderRequest(BaseModel):
     instrument: str
@@ -12,3 +14,5 @@ class ManualOrderRequest(BaseModel):
     volume: float
     platform: str
     price: Optional[float] = None
+    ticket: Optional[int] = None
+    command_type: Optional[str] = "order"

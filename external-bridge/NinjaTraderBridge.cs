@@ -1,4 +1,4 @@
-// NinjaBridge.cs - Add‑on para futuros con resolución de contrato activo y envío correcto de órdenes
+// NinjaBridge.cs - Futures add-on with active contract resolution and order execution
 #region Using declarations
 using System;
 using System.ComponentModel;
@@ -32,7 +32,7 @@ namespace NinjaTrader.NinjaScript.AddOns
         {
             if (window is ControlCenter)
             {
-                Print("NinjaBridge: Control Center detectado. Conectando...");
+                Print("NinjaBridge: Control Center detected. Connecting...");
                 ConnectWebSocket();
             }
         }
@@ -57,9 +57,9 @@ namespace NinjaTrader.NinjaScript.AddOns
             try
             {
                 var serverUri = new Uri(serverAddress);
-                Print($"NinjaBridge: Conectando a {serverUri}...");
+                Print($"NinjaBridge: Connecting to {serverUri}...");
                 await webSocket.ConnectAsync(serverUri, cts.Token);
-                Print("NinjaBridge: Conectado al servidor.");
+                Print("NinjaBridge: Connected to server.");
 
                 if (!string.IsNullOrEmpty(authToken))
                 {
@@ -74,7 +74,7 @@ namespace NinjaTrader.NinjaScript.AddOns
             }
             catch (Exception ex)
             {
-                Print($"NinjaBridge: Error de conexión - {ex.Message}");
+                Print($"NinjaBridge: Connection error - {ex.Message}");
                 await Task.Delay(5000);
                 _ = Reconnect();
             }
@@ -134,10 +134,10 @@ namespace NinjaTrader.NinjaScript.AddOns
                             if (message.TrimStart().StartsWith("{"))
                             {
                                 if (!message.Contains("\"type\":\"pong\""))
-                                    Print($"NinjaBridge: JSON ignorado: {message}");
+                                    Print($"NinjaBridge: Ignored JSON: {message}");
                                 continue;
                             }
-                            Print($"NinjaBridge: Orden recibida -> {message}");
+                            Print($"NinjaBridge: Order received -> {message}");
                             ProcessOrder(message);
                         }
                     }
@@ -162,7 +162,7 @@ namespace NinjaTrader.NinjaScript.AddOns
                 string[] parts = message.Split(' ');
                 if (parts.Length < 3)
                 {
-                    Print("NinjaBridge: Formato inválido. Use 'buy MNQ 1' o 'buy MNQ 09-24 1'");
+                    Print("NinjaBridge: Invalid format. Use 'buy MNQ 1' or 'buy MNQ 09-24 1'");
                     return;
                 }
 
@@ -175,17 +175,17 @@ namespace NinjaTrader.NinjaScript.AddOns
             }
             catch (Exception ex)
             {
-                Print($"NinjaBridge: Error al parsear orden - {ex.Message}");
+                Print($"NinjaBridge: Failed to parse order - {ex.Message}");
             }
         }
 
         private void ExecuteOrder(string action, string instrumentName, double quantity)
         {
-            Print($"=== Ejecutando orden: {action} {instrumentName} {quantity}");
+            Print($"=== Executing order: {action} {instrumentName} {quantity}");
 
             if (action != "buy" && action != "sell")
             {
-                Print($"NinjaBridge: Acción inválida '{action}'");
+                Print($"NinjaBridge: Invalid action '{action}'");
                 return;
             }
 
@@ -195,12 +195,12 @@ namespace NinjaTrader.NinjaScript.AddOns
                 instrument = Instrument.GetInstrument(instrumentName);
                 if (instrument == null)
                 {
-                    Print($"NinjaBridge: Instrumento '{instrumentName}' no encontrado");
+                    Print($"NinjaBridge: Instrument '{instrumentName}' not found");
                     return;
                 }
             }
 
-            Print($"Instrumento: {instrument.FullName}");
+            Print($"Instrument: {instrument.FullName}");
 
             Account account = Account.All.FirstOrDefault(a => a.Name == "Sim101");
             if (account == null)
@@ -208,33 +208,31 @@ namespace NinjaTrader.NinjaScript.AddOns
                 account = Account.All.FirstOrDefault();
                 if (account == null)
                 {
-                    Print("NinjaBridge: No hay cuenta disponible");
+                    Print("NinjaBridge: No account available");
                     return;
                 }
-                Print($"Usando cuenta: {account.Name}");
+                Print($"Using account: {account.Name}");
             }
             else
             {
-                Print($"Usando cuenta Sim101: {account.Name}");
+                Print($"Using Sim101 account: {account.Name}");
             }
 
             OrderAction orderAction = (action == "buy") ? OrderAction.Buy : OrderAction.Sell;
             int quantityInt = (int)quantity;
-            Print($"Cantidad (entera): {quantityInt}");
+            Print($"Quantity (integer): {quantityInt}");
 
             System.Windows.Threading.Dispatcher.CurrentDispatcher.BeginInvoke(new Action(() =>
             {
                 try
                 {
-                    // Crear la orden
                     var order = account.CreateOrder(instrument, orderAction, OrderType.Market, TimeInForce.Gtc, quantityInt, 0, 0, "", "SignalEngineOrder", null);
-                    // Enviar la orden (¡esto es lo que faltaba!)
                     account.Submit(new[] { order });
-                    Print($"NinjaBridge: ✅ Orden enviada y enviada al mercado: {action} {quantity} {instrumentName}");
+                    Print($"NinjaBridge: Order submitted to market: {action} {quantity} {instrumentName}");
                 }
                 catch (Exception ex)
                 {
-                    Print($"NinjaBridge: ❌ Error al crear/enviar orden: {ex.Message}");
+                    Print($"NinjaBridge: Failed to create/submit order: {ex.Message}");
                 }
             }));
         }
@@ -262,28 +260,28 @@ namespace NinjaTrader.NinjaScript.AddOns
                     Instrument contract = Instrument.GetInstrument(format1);
                     if (contract != null)
                     {
-                        Print($"NinjaBridge: Resuelto '{symbol}' -> '{format1}'");
+                        Print($"NinjaBridge: Resolved '{symbol}' -> '{format1}'");
                         return contract;
                     }
                     contract = Instrument.GetInstrument(format2);
                     if (contract != null)
                     {
-                        Print($"NinjaBridge: Resuelto '{symbol}' -> '{format2}'");
+                        Print($"NinjaBridge: Resolved '{symbol}' -> '{format2}'");
                         return contract;
                     }
                 }
             }
             catch (Exception ex)
             {
-                Print($"NinjaBridge: Error resolviendo contrato para '{symbol}': {ex.Message}");
+                Print($"NinjaBridge: Failed to resolve contract for '{symbol}': {ex.Message}");
             }
-            Print($"NinjaBridge: No se encontró contrato activo para '{symbol}'");
+            Print($"NinjaBridge: No active contract found for '{symbol}'");
             return null;
         }
 
         private async Task Reconnect()
         {
-            Print("NinjaBridge: Reconectando en 5 segundos...");
+            Print("NinjaBridge: Reconnecting in 5 seconds...");
             await Task.Delay(5000);
             ConnectWebSocket();
         }

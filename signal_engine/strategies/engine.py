@@ -1,83 +1,92 @@
-# signal_engine/strategies/engine.py
 import asyncio
-from typing import Dict
-from .base import BaseStrategy
-from .moving_average import MovingAverageCrossStrategy
-from ..utils.logger import setup_logger
+
 from ..risk_manager import RiskManager
+from ..supabase_client import STRATEGY_CONFIGS_TABLE, supabase
+from ..utils.logger import setup_logger
 from ..websocket_server import WebSocketServer
-from ..supabase_client import supabase, STRATEGY_CONFIGS_TABLE
-# from ..bridge_manager import ninja_socket_ws   # Comentado temporalmente
+from .order_helpers import send_order_to_mt5, send_order_to_nt8
+from .test_mt5_buy_on_bar import MT5BuyOnBarStrategy
+from .test_nt8_buy_on_bar import NT8BuyOnBarStrategy
 
 logger = setup_logger(__name__)
 
+
+# ============================================================================
+# CONFIGURACIÓN DE ESTRATEGIAS DE PRUEBA
+# ============================================================================
+# Cada entrada es un diccionario con los parámetros de una estrategia.
+# - "platform": "mt5" o "nt8"
+# - "symbol": instrumento (ej. "EURUSD", "ES 06-26")
+# - "timeframe": minutos (ej. 15, 1)
+# - "size": cantidad (volumen para MT5, contratos para NT8)
+#
+# Para desactivar una estrategia, simplemente coméntala o elimínala de la lista.
+# ============================================================================
+
+TEST_STRATEGIES = [
+    # MT5: EURUSD, 15 minutos, volumen 0.01
+    {
+        "platform": "mt5",
+        "symbol": "EURUSD",
+        "timeframe": 15,
+        "size": 0.01,
+    },
+    # NT8: ES 06-26, 1 minuto, 2 contratos
+    {
+        "platform": "nt8",
+        "symbol": "ES 06-26",
+        "timeframe": 1,
+        "size": 2,
+    },
+]
+
+
 class StrategyEngine:
     def __init__(self, ws_server: WebSocketServer, risk_manager: RiskManager):
-        self.strategies: Dict[str, BaseStrategy] = {}
         self.ws_server = ws_server
         self.risk_manager = risk_manager
         self.active = True
-        self.refresh_interval = 60
-
-    async def load_strategies_from_db(self):
-        result = supabase.table(STRATEGY_CONFIGS_TABLE).select("*").eq("is_active", True).execute()
-        configs = result.data
-        for cfg in configs:
-            if cfg["name"] == "MA_Cross":
-                params = cfg["params"]
-                strategy = MovingAverageCrossStrategy(cfg["name"], params)
-                self.strategies[cfg["name"]] = strategy
-                logger.info(f"Estrategia cargada: {cfg['name']} con params {params}")
-
-    async def refresh_configs(self):
-        while self.active:
-            await asyncio.sleep(self.refresh_interval)
-            logger.info("Refrescando configuraciones de estrategias...")
-            await self.load_strategies_from_db()
-
-    async def run_cycle(self):
-        while self.active:
-            # Datos de mercado simulados (reemplazar por datos reales)
-            market_data = {
-                'EURUSD': {
-                    'fast_ma': 1.1050,
-                    'slow_ma': 1.1040,
-                    'prev_fast_ma': 1.1045,
-                    'prev_slow_ma': 1.1040,
-                    'close': 1.1052
-                }
-            }
-            for name, strategy in self.strategies.items():
-                if not strategy.is_active:
-                    continue
-                data = market_data['EURUSD']
-                should_enter, action, volume = strategy.should_enter(data)
-                if should_enter:
-                    current_equity = 10000.0
-                    ok, msg = self.risk_manager.can_execute('EURUSD', action, volume, current_equity)
-                    if ok:
-                        # Decidir plataforma (por defecto NT8)
-                        platform = "NT8"
-                        # ### COMENTADO TEMPORALMENTE (para pruebas manuales) ###
-                        # if platform == "NT8" and ninja_socket_ws is not None:
-                        #     command = f"{action} EURUSD {volume}"
-                        #     await ninja_socket_ws.send_text(command)
-                        #     logger.info(f"Estrategia envió orden a NinjaSocket: {command}")
-                        # else:
-                        #     order = {
-                        #         'instrument': 'EURUSD',
-                        #         'action': action,
-                        #         'volume': volume,
-                        #         'order_type': 'market'
-                        #     }
-                        #     await self.ws_server.send_order_to_bridge(platform, order)
-                        # ### FIN DEL COMENTARIO ###
-                        logger.info(f"[SIMULACIÓN] Estrategia {name} generaría orden: {action} {volume} EURUSD")
-                    else:
-                        logger.warning(f"Riesgo rechazó orden: {msg}")
-            await asyncio.sleep(5)
 
     async def start(self):
-        await self.load_strategies_from_db()
-        asyncio.create_task(self.refresh_configs())
-        asyncio.create_task(self.run_cycle())
+        """Punto de entrada principal: lanza todas las estrategias configuradas."""
+        logger.info("Starting Strategy Engine...")
+        await self._start_test_strategies()
+        # Si en el futuro hay estrategias desde base de datos, se añadirían aquí.
+        # Por ahora, mantenemos el engine vivo (opcional, si no hay tareas de fondo).
+        while self.active:
+            await asyncio.sleep(3600)  # Bucle simple para mantener el engine vivo
+
+    async def _start_test_strategies(self):
+        """Crea y ejecuta cada estrategia definida en TEST_STRATEGIES."""
+        if not TEST_STRATEGIES:
+            logger.warning("No test strategies configured. Add entries to TEST_STRATEGIES.")
+            return
+
+        for cfg in TEST_STRATEGIES:
+            platform = cfg["platform"]
+            symbol = cfg["symbol"]
+            timeframe = cfg["timeframe"]
+            size = cfg["size"]
+
+            if platform == "mt5":
+                strategy = MT5BuyOnBarStrategy(
+                    send_order_func=send_order_to_mt5,
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    volume=size,
+                )
+            elif platform == "nt8":
+                strategy = NT8BuyOnBarStrategy(
+                    send_order_func=send_order_to_nt8,
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    quantity=size,
+                )
+            else:
+                logger.error(f"Unknown platform '{platform}' for strategy {symbol}. Skipping.")
+                continue
+
+            asyncio.create_task(strategy.run())
+            logger.info(f"Test strategy started: {platform} {symbol} {timeframe}min size={size}")
+
+        logger.info(f"All test strategies launched ({len(TEST_STRATEGIES)} active).")
