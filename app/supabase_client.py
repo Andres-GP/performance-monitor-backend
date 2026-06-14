@@ -1,9 +1,11 @@
+# app/supabase_client.py
 import os
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 from supabase import create_client, Client
 from .config import settings
 from .models import StrategyInfo, TradeRecord, PerformanceSnapshot
 from .utils.logger import setup_logger
+from datetime import datetime
 
 logger = setup_logger(__name__)
 
@@ -29,10 +31,20 @@ def _check_supabase():
         return False
     return True
 
+def _serialize_datetime(obj: Any) -> Any:
+    """Convierte datetime a string ISO para JSON."""
+    if isinstance(obj, datetime):
+        return obj.isoformat()
+    return obj
+
 def upsert_strategy(strategy: StrategyInfo):
     if not _check_supabase():
         return []
     data = strategy.dict()
+    # Convertir datetime a string
+    for key, value in data.items():
+        if isinstance(value, datetime):
+            data[key] = value.isoformat()
     result = supabase.table(STRATEGIES_TABLE).upsert(data, on_conflict="strategy_id").execute()
     return result.data
 
@@ -40,6 +52,9 @@ def insert_trade(trade: TradeRecord):
     if not _check_supabase():
         return []
     data = trade.dict()
+    for key, value in data.items():
+        if isinstance(value, datetime):
+            data[key] = value.isoformat()
     result = supabase.table(TRADES_TABLE).insert(data).execute()
     return result.data
 
@@ -47,6 +62,9 @@ def insert_snapshot(snapshot: PerformanceSnapshot):
     if not _check_supabase():
         return []
     data = snapshot.dict()
+    for key, value in data.items():
+        if isinstance(value, datetime):
+            data[key] = value.isoformat()
     result = supabase.table(SNAPSHOTS_TABLE).insert(data).execute()
     return result.data
 
