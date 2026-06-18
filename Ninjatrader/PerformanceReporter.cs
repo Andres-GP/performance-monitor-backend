@@ -1,4 +1,4 @@
-
+// PerformanceReporter.cs
 using System;
 using System.Net.Http;
 using System.Text;
@@ -33,7 +33,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                 _startReported = true;
                 ReportStrategyStarted();
             }
-            else if (State == State.Terminated)   
+            else if (State == State.Terminated)
             {
                 ReportStrategyStopped();
             }
@@ -41,18 +41,68 @@ namespace NinjaTrader.NinjaScript.Strategies
 
         private async void ReportStrategyStarted()
         {
+            // --- Strategy information ---
+            string instrumentType = "Unknown";
+            string timeframe = "Unknown";
+            string dataType = "Real";
+            string platform = "NT8";
+            int sizing = 1;
+
+            try
+            {
+                if (Instrument != null && Instrument.MasterInstrument != null)
+                    instrumentType = Instrument.MasterInstrument.InstrumentType.ToString();
+            }
+            catch { }
+
+            try
+            {
+                if (BarsPeriod != null)
+                {
+                    string periodType = BarsPeriod.BarsPeriodType.ToString();
+                    int periodValue = BarsPeriod.Value;
+                    timeframe = $"{periodValue} {periodType}";
+                }
+            }
+            catch { }
+
+            try
+            {
+                if (Account != null && Account.Name != null && Account.Name.Contains("Sim"))
+                    dataType = "Simulation";
+            }
+            catch { }
+
+            try
+            {
+                var quantityProp = this.GetType().GetProperty("Quantity");
+                if (quantityProp != null)
+                {
+                    object value = quantityProp.GetValue(this);
+                    if (value != null)
+                        sizing = (int)value;
+                }
+            }
+            catch { }
+
+            // --- Report strategy start ---
             var data = new
             {
                 strategy_id = this.Id.ToString(),
                 name = this.Name,
                 instrument = this.Instrument.FullName,
+                instrument_type = instrumentType,
+                timeframe = timeframe,
+                data_type = dataType,
+                platform = platform,
+                sizing = sizing,
                 start_date = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ"),
                 state = "Running"
             };
             await SendToApi("/strategies/start", data);
         }
 
-        private async void ReportStrategyStopped()  
+        private async void ReportStrategyStopped()
         {
             var data = new
             {
@@ -110,5 +160,3 @@ namespace NinjaTrader.NinjaScript.Strategies
         }
     }
 }
-
-

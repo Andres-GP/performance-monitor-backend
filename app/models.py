@@ -1,14 +1,21 @@
+# models.py
 from pydantic import BaseModel
 from datetime import datetime
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 
 class StrategyInfo(BaseModel):
     strategy_id: str
     name: str
     instrument: str
+    instrument_type: Optional[str] = None
+    timeframe: Optional[str] = None
+    data_type: Optional[str] = None
+    platform: Optional[str] = None
+    sizing: Optional[int] = None
     start_date: datetime
     state: str
     last_heartbeat: Optional[datetime] = None
+    health_status: Optional[str] = "healthy"
 
 class TradeRecord(BaseModel):
     trade_id: Optional[str] = None
