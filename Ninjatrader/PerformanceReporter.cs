@@ -134,7 +134,10 @@ namespace NinjaTrader.NinjaScript.Strategies
                 entry_price = trade.Entry.Price,
                 exit_price = trade.Exit?.Price ?? 0,
                 pnl = trade.ProfitCurrency,
-                direction = trade.Entry.Position.ToString()
+                direction = trade.Entry.Position.ToString(),
+                // ✨ NUEVO: envía la comisión (costo de transacción) 
+                // Si no está disponible, se enviará 0.
+                cost = trade.Commission
             };
             await SendToApi("/trades", data);
         }

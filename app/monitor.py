@@ -1,5 +1,6 @@
 # monitor.py
 import asyncio
+import json
 from datetime import datetime, timedelta
 from typing import List, Dict, Any
 import numpy as np
@@ -31,6 +32,9 @@ class PerformanceMonitor:
                 "concentration_max": 30,
                 "ruin_probability_max": 0.01,
                 "transaction_cost_max": 2.0,
+                "transaction_cost_gross_max": 20.0,
+                "allocation_deviation_max": 20.0,
+                "market_impact_max": 2.0,
             },
             "edge": {
                 "oos_degradation_max": 30,
@@ -43,6 +47,7 @@ class PerformanceMonitor:
 
     # ======================== DAILY CHECK ========================
     async def run_daily_check(self):
+        """Run daily performance check for all active strategies."""
         logger.info("Running daily performance check...")
         strategies = self.supabase.table("strategies").select("*").eq("state", "Running").execute()
         for strategy in strategies.data:
@@ -116,16 +121,12 @@ class PerformanceMonitor:
     async def check_market_regime(self):
         logger.info("Checking market regime...")
         try:
-            # Get real data from yfinance (with fallbacks)
             adx = regime.get_adx(symbol="SPY", period=14)
             vix_percentile = regime.get_vix_percentile()
             atr_percentile = regime.get_atr_percentile(symbol="SPY", period=14)
-            
-            # Get regime summary with all indicators
             regime_summary = regime.get_regime_summary(adx, vix_percentile, atr_percentile)
             logger.info(f"Regime summary: {regime_summary}")
             
-            # Save to market_regime table with ALL fields
             record = {
                 "date": datetime.utcnow().date().isoformat(),
                 "trend": regime_summary.get("trend"),
@@ -143,7 +144,6 @@ class PerformanceMonitor:
             }
             self.supabase.table("market_regime").insert(record).execute()
             
-            # If extreme regime, send alert
             if regime_summary.get("fear") in ["extreme_fear", "extreme_complacency"]:
                 send_alert_email(
                     "[Performance Monitor] Extreme Market Regime Detected",
@@ -152,12 +152,12 @@ class PerformanceMonitor:
         except Exception as e:
             logger.error(f"Error checking market regime: {e}")
 
-    # ======================== MONTHLY CHECK (EDGE HEALTH & PORTFOLIO) ========================
+    # ======================== MONTHLY CHECK (EDGE & PORTFOLIO) ========================
     async def run_monthly_check(self):
-        logger.info("Running monthly edge health check...")
+        logger.info("Running monthly edge health and portfolio check...")
         await self.check_edge_health()
         await self.check_portfolio_metrics()
-        logger.info("Monthly edge health check completed")
+        logger.info("Monthly check completed")
 
     async def check_edge_health(self):
         logger.info("Checking edge health...")
@@ -230,13 +230,15 @@ class PerformanceMonitor:
                 logger.info(f"Strategy {strategy_id}: edge health OK")
 
     async def check_portfolio_metrics(self):
+        """Check portfolio-level metrics with all required components."""
         logger.info("Checking portfolio-level metrics...")
-        strategies = self.supabase.table("strategies").select("strategy_id", "name", "instrument_type").eq("state", "Running").execute()
+        strategies = self.supabase.table("strategies").select("strategy_id", "name", "instrument", "instrument_type", "sizing").eq("state", "Running").execute()
         if len(strategies.data) < 2:
             logger.info("Less than 2 active strategies, skipping portfolio analysis")
             return
         
         three_months_ago = (datetime.utcnow() - timedelta(days=90)).isoformat()
+        one_month_ago = (datetime.utcnow() - timedelta(days=30)).isoformat()
         all_trades = self.supabase.table("trades").select("*").gte("exit_time", three_months_ago).execute()
         trades_data = all_trades.data
         if len(trades_data) < 10:
@@ -247,13 +249,21 @@ class PerformanceMonitor:
         df['exit_time'] = pd.to_datetime(df['exit_time'])
         df['date'] = df['exit_time'].dt.date
         df['pnl'] = df['pnl'].astype(float)
+        df['cost'] = df.get('cost', 0).astype(float).fillna(0)
         pivot = df.pivot_table(index='date', columns='strategy_id', values='pnl', aggfunc='sum', fill_value=0)
         if len(pivot.columns) < 2:
             logger.info("Not enough data for correlation analysis")
             return
         
         alerts = []
+        correlation_matrix = {}
+        concentration_metrics = {}
+        allocation_deviations = {}
+        initial_capital = 100000  # Configurable; podrías obtenerlo de accounts
+
+        # --- 1. Correlation ---
         corr_matrix = pivot.corr()
+        correlation_matrix = corr_matrix.to_dict()
         for i in range(len(corr_matrix.columns)):
             for j in range(i+1, len(corr_matrix.columns)):
                 corr_val = corr_matrix.iloc[i, j]
@@ -262,6 +272,7 @@ class PerformanceMonitor:
                     strategy_b = corr_matrix.columns[j]
                     alerts.append(f"High correlation between {strategy_a} and {strategy_b}: {corr_val:.2f} (threshold: {self.thresholds['portfolio']['max_correlation']})")
         
+        # --- 2. Drawdown ---
         portfolio_equity = pivot.sum(axis=1).cumsum()
         if len(portfolio_equity) > 0:
             peak = portfolio_equity.cummax()
@@ -272,12 +283,14 @@ class PerformanceMonitor:
                 if max_dd > self.thresholds["portfolio"]["critical_drawdown_global"]:
                     alerts.append(f"CRITICAL: Portfolio drawdown {max_dd:.1f}% exceeds critical limit ({self.thresholds['portfolio']['critical_drawdown_global']}%)")
         
+        # --- 3. Sharpe ---
         daily_returns = pivot.sum(axis=1).values
         if len(daily_returns) > 0:
             sharpe = (np.mean(daily_returns) / (np.std(daily_returns) + 1e-6)) * np.sqrt(252) if np.std(daily_returns) > 0 else 0
             if sharpe < self.thresholds["portfolio"]["sharpe_min"]:
                 alerts.append(f"Portfolio Sharpe ratio: {sharpe:.2f} (threshold: {self.thresholds['portfolio']['sharpe_min']})")
         
+        # --- 4. Concentration ---
         strategies_dict = {s["strategy_id"]: s for s in strategies.data}
         category_exposure = {}
         for strategy_id in pivot.columns:
@@ -292,7 +305,9 @@ class PerformanceMonitor:
                 percentage = exposure / total_exposure * 100
                 if percentage > self.thresholds["portfolio"]["concentration_max"]:
                     alerts.append(f"Concentration in {category}: {percentage:.1f}% (threshold: {self.thresholds['portfolio']['concentration_max']}%)")
+                    concentration_metrics[category] = round(percentage, 2)
         
+        # --- 5. Ruin probability ---
         if len(daily_returns) > 10:
             np.random.seed(42)
             mean_ret = np.mean(daily_returns)
@@ -302,12 +317,72 @@ class PerformanceMonitor:
             simulations = np.random.normal(mean_ret, std_ret, (n_simulations, n_days))
             final_equity = np.cumsum(simulations, axis=1)
             max_loss = final_equity.min(axis=1)
-            initial_capital = 100000
             ruin_count = np.sum(max_loss < -0.4 * initial_capital)
             ruin_prob = ruin_count / n_simulations * 100
             if ruin_prob > self.thresholds["portfolio"]["ruin_probability_max"] * 100:
                 alerts.append(f"Ruin probability: {ruin_prob:.2f}% (threshold: {self.thresholds['portfolio']['ruin_probability_max']*100}%)")
         
+        # --- 6. Allocation (new) ---
+        weights_result = self.supabase.table("portfolio_weights").select("strategy_id", "target_weight").execute()
+        if weights_result.data:
+            target_weights = {w["strategy_id"]: w["target_weight"] for w in weights_result.data}
+            total_pnl_portfolio = pivot.sum().sum()
+            if total_pnl_portfolio != 0:
+                for strategy_id in pivot.columns:
+                    if strategy_id in target_weights:
+                        actual_weight = pivot[strategy_id].sum() / total_pnl_portfolio * 100
+                        target = target_weights[strategy_id]
+                        deviation = abs(actual_weight - target) / target * 100 if target > 0 else 0
+                        allocation_deviations[strategy_id] = {
+                            "target": round(target, 2),
+                            "actual": round(actual_weight, 2),
+                            "deviation": round(deviation, 2)
+                        }
+                        if deviation > self.thresholds["portfolio"]["allocation_deviation_max"]:
+                            alerts.append(f"Allocation deviation for strategy {strategy_id}: actual {actual_weight:.1f}% vs target {target:.1f}% (deviation {deviation:.1f}%)")
+
+        # --- 7. Transaction costs ---
+        monthly_trades = [t for t in trades_data if t.get("exit_time") and t["exit_time"] >= one_month_ago]
+        total_cost = sum(t.get("cost", 0) for t in monthly_trades)
+        gross_profit = sum(t.get("pnl", 0) for t in monthly_trades if t.get("pnl", 0) > 0)
+        monthly_cost_pct_capital = (total_cost / initial_capital) * 100 if initial_capital > 0 else 0
+        monthly_cost_pct_gross = (total_cost / gross_profit) * 100 if gross_profit > 0 else 0
+        
+        if monthly_cost_pct_capital > self.thresholds["portfolio"]["transaction_cost_max"]:
+            alerts.append(f"Transaction costs: {monthly_cost_pct_capital:.2f}% of capital (threshold: {self.thresholds['portfolio']['transaction_cost_max']}%)")
+        if monthly_cost_pct_gross > self.thresholds["portfolio"]["transaction_cost_gross_max"]:
+            alerts.append(f"Transaction costs: {monthly_cost_pct_gross:.2f}% of gross profit (threshold: {self.thresholds['portfolio']['transaction_cost_gross_max']}%)")
+        
+        # --- 8. Market impact ---
+        for strategy in strategies.data:
+            strategy_id = strategy["strategy_id"]
+            sizing = strategy.get("sizing", 1)
+            instrument = strategy.get("instrument", "")
+            symbol = instrument.split(" ")[0] if instrument else ""
+            if symbol:
+                avg_volume = regime.get_average_daily_volume(symbol)
+                if avg_volume > 0:
+                    position_size = sizing
+                    market_impact_pct = (position_size / avg_volume) * 100
+                    if market_impact_pct > self.thresholds["portfolio"]["market_impact_max"]:
+                        alerts.append(f"Market impact risk for {strategy_id}: position size {position_size} is {market_impact_pct:.2f}% of daily volume (threshold: {self.thresholds['portfolio']['market_impact_max']}%)")
+
+        # Save portfolio metrics
+        try:
+            self.supabase.table("portfolio_metrics").insert({
+                "date": datetime.utcnow().date().isoformat(),
+                "sharpe_ratio": round(sharpe, 2) if 'sharpe' in locals() else None,
+                "max_drawdown": round(max_dd, 2) if 'max_dd' in locals() else None,
+                "ruin_probability": round(ruin_prob, 2) if 'ruin_prob' in locals() else None,
+                "transaction_cost_pct": round(monthly_cost_pct_capital, 2),
+                "correlation_matrix": json.dumps(correlation_matrix) if correlation_matrix else None,
+                "concentration_metrics": json.dumps(concentration_metrics) if concentration_metrics else None,
+                "allocation_deviations": json.dumps(allocation_deviations) if allocation_deviations else None,
+            }).execute()
+        except Exception as e:
+            logger.error(f"Failed to store portfolio metrics: {e}")
+
+        # Send alerts
         if alerts:
             subject = "[Performance Monitor] Portfolio Alerts"
             body = "Portfolio-level alerts:\n\n" + "\n".join(alerts) + f"\n\nTimestamp: {datetime.utcnow().isoformat()}"

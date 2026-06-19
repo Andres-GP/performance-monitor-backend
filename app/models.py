@@ -28,6 +28,7 @@ class TradeRecord(BaseModel):
     exit_price: Optional[float]
     pnl: Optional[float]
     direction: str  # "Long" or "Short"
+    cost: Optional[float] = None  # <-- NUEVO: costo de transacción (comisión + slippage)
 
 class PerformanceSnapshot(BaseModel):
     strategy_id: str

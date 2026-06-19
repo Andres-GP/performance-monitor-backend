@@ -315,6 +315,41 @@ def create_app() -> FastAPI:
         result = supabase.table("strategies").delete().eq("strategy_id", strategy_id).execute()
         logger.info(f"Strategy {strategy_id} deleted.")
         return {"status": "deleted"}
+    
+    # ---- Portfolio management ----
+    @app.get("/portfolio/metrics", dependencies=[Depends(verify_token)])
+    async def get_portfolio_metrics(limit: int = 1):
+        """Get the latest portfolio metrics."""
+        result = supabase.table("portfolio_metrics").select("*").order("created_at", desc=True).limit(limit).execute()
+        if not result.data:
+            raise HTTPException(status_code=404, detail="No portfolio metrics available")
+        return result.data[0] if limit == 1 else result.data
+
+    @app.post("/portfolio/weights", dependencies=[Depends(verify_token)])
+    async def set_portfolio_weights(data: dict):
+        """Set or update target weights for a strategy."""
+        strategy_id = data.get("strategy_id")
+        target_weight = data.get("target_weight")
+        if not strategy_id or target_weight is None:
+            raise HTTPException(status_code=400, detail="strategy_id and target_weight required")
+        # Verificar que la estrategia existe
+        strategy = supabase.table("strategies").select("strategy_id").eq("strategy_id", strategy_id).execute()
+        if not strategy.data:
+            raise HTTPException(status_code=404, detail="Strategy not found")
+        # Upsert
+        supabase.table("portfolio_weights").upsert({
+            "strategy_id": strategy_id,
+            "target_weight": target_weight,
+            "updated_at": datetime.utcnow().isoformat()
+        }, on_conflict="strategy_id").execute()
+        logger.info(f"Portfolio weight set for {strategy_id}: {target_weight}%")
+        return {"status": "updated"}
+
+    @app.get("/portfolio/weights", dependencies=[Depends(verify_token)])
+    async def get_portfolio_weights():
+        """Get all portfolio weights."""
+        result = supabase.table("portfolio_weights").select("*").execute()
+        return result.data
 
     # ---- WebSocket (legacy) ----
     @app.websocket("/ws/performance")

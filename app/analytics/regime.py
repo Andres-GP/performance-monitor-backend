@@ -121,6 +121,21 @@ def get_correlation(symbol1: str, symbol2: str, period_days: int = 30) -> float:
         print(f"Error calculating correlation {symbol1} vs {symbol2}: {e}")
         return 0.0
 
+def get_average_daily_volume(symbol: str) -> float:
+    """
+    Get average daily volume (20 days) for a given symbol.
+    Returns 0.0 if data is unavailable.
+    """
+    try:
+        data = yf.download(symbol, period="1mo", interval="1d", progress=False)
+        if data.empty:
+            return 0.0
+        avg_volume = data['Volume'].mean()
+        return float(avg_volume) if not np.isnan(avg_volume) else 0.0
+    except Exception as e:
+        print(f"Error getting volume for {symbol}: {e}")
+        return 0.0
+    
 def get_regime_summary(adx: float, vix_percentile: float, atr_percentile: float) -> Dict[str, Any]:
     """
     Return a complete market regime summary with all indicators.
