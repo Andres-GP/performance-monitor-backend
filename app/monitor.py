@@ -116,12 +116,17 @@ class PerformanceMonitor:
     async def check_market_regime(self):
         logger.info("Checking market regime...")
         try:
+            # Get real data from yfinance (with fallbacks)
             adx = regime.get_adx(symbol="SPY", period=14)
             vix_percentile = regime.get_vix_percentile()
             atr_percentile = regime.get_atr_percentile(symbol="SPY", period=14)
+            
+            # Get regime summary with all indicators
             regime_summary = regime.get_regime_summary(adx, vix_percentile, atr_percentile)
             logger.info(f"Regime summary: {regime_summary}")
-            self.supabase.table("market_regime").insert({
+            
+            # Save to market_regime table with ALL fields
+            record = {
                 "date": datetime.utcnow().date().isoformat(),
                 "trend": regime_summary.get("trend"),
                 "fear": regime_summary.get("fear"),
@@ -129,7 +134,16 @@ class PerformanceMonitor:
                 "adx": regime_summary.get("adx"),
                 "vix_percentile": regime_summary.get("vix_percentile"),
                 "atr_percentile": regime_summary.get("atr_percentile"),
-            }).execute()
+                "breadth": regime_summary.get("breadth"),
+                "strength": regime_summary.get("strength"),
+                "advance_decline_ratio": regime_summary.get("advance_decline_ratio"),
+                "nh_nl_ratio": regime_summary.get("nh_nl_ratio"),
+                "correlation_spy_qqq": regime_summary.get("correlation_spy_qqq"),
+                "correlation_spy_tlt": regime_summary.get("correlation_spy_tlt"),
+            }
+            self.supabase.table("market_regime").insert(record).execute()
+            
+            # If extreme regime, send alert
             if regime_summary.get("fear") in ["extreme_fear", "extreme_complacency"]:
                 send_alert_email(
                     "[Performance Monitor] Extreme Market Regime Detected",
@@ -191,14 +205,13 @@ class PerformanceMonitor:
             if win_rate < self.thresholds["edge"]["walk_forward_win_rate_min"]:
                 alerts.append(f"Walk-forward win rate: {win_rate:.1f}% (threshold: {self.thresholds['edge']['walk_forward_win_rate_min']}%)")
             
-            # Save edge metrics
             edge_record = {
                 "strategy_id": strategy_id,
                 "date": datetime.utcnow().date().isoformat(),
                 "oos_degradation": oos_degradation,
                 "efficiency_ratio": efficiency_ratio,
                 "walk_forward_win_rate": win_rate,
-                "oos_drawdown_ratio": None,  # Placeholder
+                "oos_drawdown_ratio": None,
                 "skewness": skewness,
                 "health_status": "decay" if alerts else "healthy"
             }
@@ -240,7 +253,6 @@ class PerformanceMonitor:
             return
         
         alerts = []
-        # Correlation
         corr_matrix = pivot.corr()
         for i in range(len(corr_matrix.columns)):
             for j in range(i+1, len(corr_matrix.columns)):
@@ -250,7 +262,6 @@ class PerformanceMonitor:
                     strategy_b = corr_matrix.columns[j]
                     alerts.append(f"High correlation between {strategy_a} and {strategy_b}: {corr_val:.2f} (threshold: {self.thresholds['portfolio']['max_correlation']})")
         
-        # Portfolio drawdown
         portfolio_equity = pivot.sum(axis=1).cumsum()
         if len(portfolio_equity) > 0:
             peak = portfolio_equity.cummax()
@@ -261,14 +272,12 @@ class PerformanceMonitor:
                 if max_dd > self.thresholds["portfolio"]["critical_drawdown_global"]:
                     alerts.append(f"CRITICAL: Portfolio drawdown {max_dd:.1f}% exceeds critical limit ({self.thresholds['portfolio']['critical_drawdown_global']}%)")
         
-        # Portfolio Sharpe
         daily_returns = pivot.sum(axis=1).values
         if len(daily_returns) > 0:
             sharpe = (np.mean(daily_returns) / (np.std(daily_returns) + 1e-6)) * np.sqrt(252) if np.std(daily_returns) > 0 else 0
             if sharpe < self.thresholds["portfolio"]["sharpe_min"]:
                 alerts.append(f"Portfolio Sharpe ratio: {sharpe:.2f} (threshold: {self.thresholds['portfolio']['sharpe_min']})")
         
-        # Exposure by category
         strategies_dict = {s["strategy_id"]: s for s in strategies.data}
         category_exposure = {}
         for strategy_id in pivot.columns:
@@ -284,7 +293,6 @@ class PerformanceMonitor:
                 if percentage > self.thresholds["portfolio"]["concentration_max"]:
                     alerts.append(f"Concentration in {category}: {percentage:.1f}% (threshold: {self.thresholds['portfolio']['concentration_max']}%)")
         
-        # Ruin probability (simplified Monte Carlo)
         if len(daily_returns) > 10:
             np.random.seed(42)
             mean_ret = np.mean(daily_returns)
@@ -294,7 +302,6 @@ class PerformanceMonitor:
             simulations = np.random.normal(mean_ret, std_ret, (n_simulations, n_days))
             final_equity = np.cumsum(simulations, axis=1)
             max_loss = final_equity.min(axis=1)
-            # Assuming initial capital of 100,000 (you can make this configurable)
             initial_capital = 100000
             ruin_count = np.sum(max_loss < -0.4 * initial_capital)
             ruin_prob = ruin_count / n_simulations * 100

@@ -230,7 +230,7 @@ def create_app() -> FastAPI:
         strategy_id = data.get("strategy_id")
         if not strategy_id:
             raise HTTPException(status_code=400, detail="strategy_id required")
-        strategy = supabase.table("strategies").select("id").eq("strategy_id", strategy_id).execute()
+        strategy = supabase.table("strategies").select("strategy_id").eq("strategy_id", strategy_id).execute()
         if not strategy.data:
             raise HTTPException(status_code=404, detail="Strategy not found")
         record = {
@@ -246,33 +246,22 @@ def create_app() -> FastAPI:
         logger.info(f"Backtest data uploaded for strategy {strategy_id}")
         return {"status": "uploaded"}
 
-    # ---- Query endpoints (UNIFICADO) ----
+    # ---- Query endpoints ----
     @app.get("/strategies", dependencies=[Depends(verify_token)])
     async def get_strategies():
-        """Get all strategies with their performance metrics, edge health, and backtest data."""
         strategies = supabase.table("strategies").select("*").execute()
         result = []
         
         for strategy in strategies.data:
             strategy_id = strategy["strategy_id"]
             
-            # Get latest performance metrics
             metrics = supabase.table("performance_metrics").select("*").eq("strategy_id", strategy_id).order("date", desc=True).limit(1).execute()
-            
-            # Get latest edge health metrics
             edge_metrics = supabase.table("edge_metrics").select("*").eq("strategy_id", strategy_id).order("date", desc=True).limit(1).execute()
-            
-            # Get latest backtest data
             backtest = supabase.table("backtest_data").select("*").eq("strategy_id", strategy_id).order("period_start", desc=True).limit(1).execute()
-            
-            # Get trades count
             trades_count = supabase.table("trades").select("id", count="exact").eq("strategy_id", strategy_id).execute()
-            
-            # Get alerts last 30 days
             thirty_days_ago = (datetime.utcnow() - timedelta(days=30)).isoformat()
             alerts = supabase.table("health_alerts").select("id", count="exact").eq("strategy_id", strategy_id).gte("timestamp", thirty_days_ago).execute()
             
-            # Build enriched strategy object
             strategy_data = {
                 **strategy,
                 "metrics": metrics.data[0] if metrics.data else None,
@@ -287,7 +276,6 @@ def create_app() -> FastAPI:
 
     @app.get("/performance/metrics/{strategy_id}", dependencies=[Depends(verify_token)])
     async def get_strategy_metrics(strategy_id: str, days: int = 30):
-        """Get historical performance metrics for a specific strategy."""
         days_ago = (datetime.utcnow() - timedelta(days=days)).isoformat()
         result = supabase.table("performance_metrics").select("*").eq("strategy_id", strategy_id).gte("date", days_ago).order("date", desc=True).execute()
         return result.data
@@ -304,6 +292,14 @@ def create_app() -> FastAPI:
         result = supabase.table("health_alerts").select("*").order("timestamp", desc=True).limit(limit).execute()
         return result.data
 
+    # ---- Market regime endpoint (CORREGIDO: ordena por created_at) ----
+    @app.get("/market/regime", dependencies=[Depends(verify_token)])
+    async def get_market_regime(limit: int = 1):
+        result = supabase.table("market_regime").select("*").order("created_at", desc=True).limit(limit).execute()
+        if not result.data:
+            raise HTTPException(status_code=404, detail="No market regime data available")
+        return result.data[0] if limit == 1 else result.data
+
     @app.delete("/strategies/{strategy_id}", dependencies=[Depends(verify_token)])
     async def delete_strategy(strategy_id: str):
         strategy = supabase.table("strategies").select("state").eq("strategy_id", strategy_id).execute()
@@ -311,7 +307,6 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail="Strategy not found")
         if strategy.data[0]["state"] != "Stopped":
             raise HTTPException(status_code=400, detail="Strategy must be Stopped before deletion")
-        # Delete related data
         supabase.table("health_alerts").delete().eq("strategy_id", strategy_id).execute()
         supabase.table("trades").delete().eq("strategy_id", strategy_id).execute()
         supabase.table("performance_metrics").delete().eq("strategy_id", strategy_id).execute()
