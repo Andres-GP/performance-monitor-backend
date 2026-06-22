@@ -1,4 +1,3 @@
-# models.py
 from pydantic import BaseModel
 from datetime import datetime
 from typing import Optional, List, Dict, Any
@@ -18,7 +17,7 @@ class StrategyInfo(BaseModel):
     health_status: Optional[str] = "healthy"
 
 class TradeRecord(BaseModel):
-    trade_id: Optional[str] = None
+    trade_id: Optional[str] = None  # ✅ Opcional (NinjaTrader puede enviarlo)
     strategy_id: str
     instrument: str
     entry_time: datetime
@@ -28,7 +27,7 @@ class TradeRecord(BaseModel):
     exit_price: Optional[float]
     pnl: Optional[float]
     direction: str  # "Long" or "Short"
-    cost: Optional[float] = None  # <-- NUEVO: costo de transacción (comisión + slippage)
+    cost: Optional[float] = None
 
 class PerformanceSnapshot(BaseModel):
     strategy_id: str

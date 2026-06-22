@@ -78,33 +78,127 @@ def create_app() -> FastAPI:
         return {"status": "ok"}
 
     # ---- Strategy lifecycle ----
-    @app.post("/strategies/start", dependencies=[Depends(verify_token)])
+    @app.post("/strategies/start", 
+              dependencies=[Depends(verify_token)],
+              openapi_extra={
+                  "requestBody": {
+                      "content": {
+                          "application/json": {
+                              "examples": {
+                                  "mt5": {
+                                      "summary": "MT5 Strategy",
+                                      "value": {
+                                          "strategy_id": "1782168806_TestStrategyMT5",
+                                          "name": "TestStrategyMT5",
+                                          "instrument": "US100Cash",
+                                          "instrument_type": "Future",
+                                          "timeframe": "PERIOD_M1",
+                                          "data_type": "Simulation",
+                                          "platform": "MT5",
+                                          "sizing": 10,
+                                          "start_date": "2026-06-22T22:53:26Z",
+                                          "state": "Running"
+                                      }
+                                  },
+                                  "nt8": {
+                                      "summary": "NT8 Strategy",
+                                      "value": {
+                                          "strategy_id": "392667451",
+                                          "name": "TestStrategy",
+                                          "instrument": "GC AUG26",
+                                          "instrument_type": "Future",
+                                          "timeframe": "1 Minute",
+                                          "data_type": "Simulation",
+                                          "platform": "NT8",
+                                          "sizing": 5,
+                                          "start_date": "2026-06-22T18:21:48.725Z",
+                                          "state": "Running"
+                                      }
+                                  }
+                              }
+                          }
+                      }
+                  }
+              })
     async def strategy_started(data: dict):
         logger.info(f"Strategy start: {data}")
-        try:
-            start_date = parse_datetime(data["start_date"])
-        except Exception as e:
-            logger.warning(f"Date parse error: {e}, using UTC now")
-            start_date = datetime.utcnow()
-        strategy = StrategyInfo(
-            strategy_id=data["strategy_id"],
-            name=data["name"],
-            instrument=data["instrument"],
-            instrument_type=data.get("instrument_type"),
-            timeframe=data.get("timeframe"),
-            data_type=data.get("data_type"),
-            platform=data.get("platform"),
-            sizing=data.get("sizing"),
-            start_date=start_date,
-            state=data.get("state", "Running"),
-            health_status="healthy"
-        )
-        strategy_dict = strategy.dict()
-        strategy_dict["start_date"] = strategy_dict["start_date"].isoformat()
-        supabase.table("strategies").upsert(strategy_dict, on_conflict="strategy_id").execute()
-        return {"status": "ok"}
+        
+        strategy_name = data["name"]
+        instrument = data["instrument"]
+        platform = data.get("platform", "NT8")
+        new_strategy_id = data["strategy_id"]
+        
+        # Search for existing strategy by name + instrument + platform
+        existing = supabase.table("strategies").select("*")\
+            .eq("name", strategy_name)\
+            .eq("instrument", instrument)\
+            .eq("platform", platform).execute()
+        
+        if existing.data:
+            existing_id = existing.data[0]["strategy_id"]
+            current_state = existing.data[0].get("state", "Unknown")
+            logger.info(f"Strategy '{strategy_name}' on '{instrument}' already exists (ID: {existing_id}, state: {current_state}). Reactivating.")
+            
+            supabase.table("strategies").update({
+                "state": "Running",
+                "updated_at": datetime.utcnow().isoformat(),
+                "instrument_type": data.get("instrument_type"),
+                "timeframe": data.get("timeframe"),
+                "data_type": data.get("data_type"),
+                "sizing": data.get("sizing"),
+                "last_heartbeat": datetime.utcnow().isoformat(),
+                "health_status": "healthy"
+            }).eq("strategy_id", existing_id).execute()
+            
+            logger.info(f"Strategy reactivated with existing ID: {existing_id}. New ID {new_strategy_id} ignored.")
+            return {"status": "ok", "strategy_id": existing_id, "action": "reactivated"}
+        
+        else:
+            try:
+                start_date = parse_datetime(data["start_date"])
+            except Exception as e:
+                logger.warning(f"Date parse error: {e}, using UTC now")
+                start_date = datetime.utcnow()
+                
+            strategy = StrategyInfo(
+                strategy_id=new_strategy_id,
+                name=strategy_name,
+                instrument=instrument,
+                instrument_type=data.get("instrument_type"),
+                timeframe=data.get("timeframe"),
+                data_type=data.get("data_type"),
+                platform=platform,
+                sizing=data.get("sizing"),
+                start_date=start_date,
+                state=data.get("state", "Running"),
+                health_status="healthy"
+            )
+            strategy_dict = strategy.dict()
+            strategy_dict["start_date"] = strategy_dict["start_date"].isoformat()
+            supabase.table("strategies").upsert(strategy_dict, on_conflict="strategy_id").execute()
+            logger.info(f"New strategy created: {strategy_name} on {instrument} (ID: {new_strategy_id})")
+            return {"status": "ok", "strategy_id": new_strategy_id, "action": "created"}
 
-    @app.post("/strategies/stop", dependencies=[Depends(verify_token)])
+    @app.post("/strategies/stop", 
+              dependencies=[Depends(verify_token)],
+              openapi_extra={
+                  "requestBody": {
+                      "content": {
+                          "application/json": {
+                              "examples": {
+                                  "example": {
+                                      "summary": "Stop a strategy",
+                                      "value": {
+                                          "strategy_id": "1782168806_TestStrategyMT5",
+                                          "state": "Stopped",
+                                          "stopped_at": "2026-06-22T23:00:00Z"
+                                      }
+                                  }
+                              }
+                          }
+                      }
+                  }
+              })
     async def strategy_stopped(data: dict):
         logger.info(f"Strategy stop: {data}")
         supabase.table("strategies").update({
@@ -113,35 +207,145 @@ def create_app() -> FastAPI:
         }).eq("strategy_id", data["strategy_id"]).execute()
         return {"status": "ok"}
 
-    @app.post("/trades", dependencies=[Depends(verify_token)])
+    # ---- Trades ----
+    @app.post("/trades", 
+              dependencies=[Depends(verify_token)],
+              openapi_extra={
+                  "requestBody": {
+                      "content": {
+                          "application/json": {
+                              "examples": {
+                                  "example": {
+                                      "summary": "Closed trade from MT5",
+                                      "value": {
+                                          "strategy_id": "1782168806_TestStrategyMT5",
+                                          "instrument": "US100Cash",
+                                          "entry_time": "2026-06-22T22:55:29Z",
+                                          "exit_time": "2026-06-22T22:55:59Z",
+                                          "quantity": 0,
+                                          "entry_price": 30333.7,
+                                          "exit_price": 30316.86,
+                                          "pnl": 0.0,
+                                          "direction": "Long",
+                                          "cost": 0.0
+                                      }
+                                  }
+                              }
+                          }
+                      }
+                  }
+              })
     async def trade_closed(data: dict):
         logger.info(f"Trade received: {data}")
+        
+        strategy_id = data["strategy_id"]
+        instrument = data["instrument"]
+        platform = "MT5"
+        
+        strategy = supabase.table("strategies").select("strategy_id").eq("strategy_id", strategy_id).execute()
+        
+        if not strategy.data:
+            logger.warning(f"Strategy {strategy_id} not found. Looking for strategy on instrument '{instrument}' with platform '{platform}'...")
+            
+            existing = supabase.table("strategies").select("strategy_id, name")\
+                .eq("instrument", instrument)\
+                .eq("platform", platform)\
+                .eq("state", "Running").execute()
+            
+            if existing.data:
+                strategy_id = existing.data[0]["strategy_id"]
+                strategy_name = existing.data[0]["name"]
+                logger.info(f"Found existing strategy for {instrument}: {strategy_name} (ID: {strategy_id}). Using this ID.")
+            else:
+                existing = supabase.table("strategies").select("strategy_id, name")\
+                    .eq("instrument", instrument)\
+                    .eq("platform", platform).execute()
+                
+                if existing.data:
+                    strategy_id = existing.data[0]["strategy_id"]
+                    strategy_name = existing.data[0]["name"]
+                    logger.info(f"Found Stopped strategy for {instrument}: {strategy_name} (ID: {strategy_id}). Reactivating and using this ID.")
+                    
+                    supabase.table("strategies").update({
+                        "state": "Running",
+                        "updated_at": datetime.utcnow().isoformat(),
+                        "last_heartbeat": datetime.utcnow().isoformat(),
+                        "health_status": "healthy"
+                    }).eq("strategy_id", strategy_id).execute()
+                else:
+                    logger.warning(f"No strategy found for instrument '{instrument}'. Creating on the fly...")
+                    strategy_name = f"MT5_{instrument}"
+                    try:
+                        supabase.table("strategies").insert({
+                            "strategy_id": strategy_id,
+                            "name": strategy_name,
+                            "instrument": instrument,
+                            "platform": platform,
+                            "state": "Running",
+                            "start_date": datetime.utcnow().isoformat(),
+                            "health_status": "healthy",
+                            "last_heartbeat": datetime.utcnow().isoformat()
+                        }).execute()
+                        logger.info(f"Strategy created on the fly: {strategy_id} for {instrument}")
+                    except Exception as e:
+                        logger.error(f"Failed to create strategy on the fly: {e}")
+                        raise HTTPException(status_code=500, detail="Failed to create strategy")
+        
         try:
             entry_time = parse_datetime(data["entry_time"])
             exit_time = parse_datetime(data["exit_time"]) if data.get("exit_time") else None
         except Exception as e:
             logger.warning(f"Date parse error: {e}, using UTC now")
             entry_time = exit_time = datetime.utcnow()
+            
         trade = TradeRecord(
-            strategy_id=data["strategy_id"],
-            instrument=data["instrument"],
+            strategy_id=strategy_id,
+            instrument=instrument,
             entry_time=entry_time,
             exit_time=exit_time,
-            quantity=data["quantity"],
-            entry_price=data["entry_price"],
+            quantity=data.get("quantity", 0),
+            entry_price=data.get("entry_price", 0.0),
             exit_price=data.get("exit_price"),
-            pnl=data.get("pnl"),
-            direction=data.get("direction", "Long")
+            pnl=data.get("pnl", 0.0),
+            direction=data.get("direction", "Long"),
+            cost=data.get("cost", 0.0)
         )
         trade_dict = trade.dict()
         trade_dict["entry_time"] = trade_dict["entry_time"].isoformat()
         if trade_dict["exit_time"]:
             trade_dict["exit_time"] = trade_dict["exit_time"].isoformat()
+
+        fields_to_remove = ["trade_id"]  
+        for field in fields_to_remove:
+            if field in trade_dict:
+                del trade_dict[field]
+        
         supabase.table("trades").insert(trade_dict).execute()
         return {"status": "ok"}
 
     # ---- Health alerts ----
-    @app.post("/alerts", dependencies=[Depends(verify_token)])
+    @app.post("/alerts", 
+              dependencies=[Depends(verify_token)],
+              openapi_extra={
+                  "requestBody": {
+                      "content": {
+                          "application/json": {
+                              "examples": {
+                                  "example": {
+                                      "summary": "Frozen order alert",
+                                      "value": {
+                                          "strategy_id": "1782168806_TestStrategyMT5",
+                                          "timestamp": "2026-06-22T22:55:00Z",
+                                          "problem_type": "Frozen order",
+                                          "details": "Order LongEntry has been Submitted for 6.6 seconds. Cancelling.",
+                                          "severity": "high"
+                                      }
+                                  }
+                              }
+                          }
+                      }
+                  }
+              })
     async def receive_alert(alert: dict):
         logger.warning(f"Health alert: {alert['problem_type']} - {alert['details']}")
         timestamp_str = alert.get("timestamp")
@@ -150,7 +354,6 @@ def create_app() -> FastAPI:
         elif not isinstance(timestamp_str, str):
             timestamp_str = datetime.utcnow().isoformat()
 
-        # Get strategy name for email
         strategy_name = alert.get("strategy_id")
         try:
             result = supabase.table("strategies").select("name").eq("strategy_id", alert["strategy_id"]).execute()
@@ -168,7 +371,6 @@ def create_app() -> FastAPI:
         }
         supabase.table("health_alerts").insert(record).execute()
 
-        # Update health_status
         if "healthy" in alert["problem_type"].lower():
             supabase.table("strategies").update({"health_status": "healthy"}).eq("strategy_id", alert["strategy_id"]).execute()
         else:
@@ -181,8 +383,65 @@ def create_app() -> FastAPI:
 
         return {"status": "alert received"}
 
+    # ---- Heartbeat ----
+    @app.post("/heartbeat", 
+              dependencies=[Depends(verify_token)],
+              openapi_extra={
+                  "requestBody": {
+                      "content": {
+                          "application/json": {
+                              "examples": {
+                                  "example": {
+                                      "summary": "Heartbeat from MT5 strategy",
+                                      "value": {
+                                          "strategy_id": "1782168806_TestStrategyMT5"
+                                      }
+                                  }
+                              }
+                          }
+                      }
+                  }
+              })
+    async def receive_heartbeat(data: dict):
+        """Receives heartbeat from a strategy (MetaTrader)."""
+        strategy_id = data.get("strategy_id")
+        if not strategy_id:
+            raise HTTPException(status_code=400, detail="strategy_id required")
+        
+        strategy = supabase.table("strategies").select("strategy_id").eq("strategy_id", strategy_id).execute()
+        if not strategy.data:
+            logger.warning(f"Heartbeat for unknown strategy: {strategy_id}. Ignoring.")
+            return {"status": "ignored", "reason": "strategy not found"}
+        
+        supabase.table("strategies").update({
+            "last_heartbeat": datetime.utcnow().isoformat()
+        }).eq("strategy_id", strategy_id).execute()
+        
+        logger.info(f"Heartbeat received for strategy: {strategy_id}")
+        return {"status": "ok"}
+
     # ---- Capital ----
-    @app.post("/capital/report", dependencies=[Depends(verify_token)])
+    @app.post("/capital/report", 
+              dependencies=[Depends(verify_token)],
+              openapi_extra={
+                  "requestBody": {
+                      "content": {
+                          "application/json": {
+                              "examples": {
+                                  "example": {
+                                      "summary": "Report account capital",
+                                      "value": {
+                                          "strategy_id": "1782168806_TestStrategyMT5",
+                                          "account_type": "demo",
+                                          "capital": 99846.02,
+                                          "currency": "USD"
+                                      }
+                                  }
+                              }
+                          }
+                      }
+                  }
+              })
     async def report_capital(data: dict):
         account_type = data.get("account_type", "real")
         capital = data.get("capital")
@@ -225,7 +484,30 @@ def create_app() -> FastAPI:
         return summary
 
     # ---- Backtest upload ----
-    @app.post("/backtest/upload", dependencies=[Depends(verify_token)])
+    @app.post("/backtest/upload", 
+              dependencies=[Depends(verify_token)],
+              openapi_extra={
+                  "requestBody": {
+                      "content": {
+                          "application/json": {
+                              "examples": {
+                                  "example": {
+                                      "summary": "Upload backtest data",
+                                      "value": {
+                                          "strategy_id": "1782168806_TestStrategyMT5",
+                                          "period_start": "2025-01-01",
+                                          "period_end": "2025-12-31",
+                                          "expected_pnl": 15000,
+                                          "expected_sharpe": 1.8,
+                                          "expected_drawdown": 8.0,
+                                          "parameters": {"fast": 10, "slow": 25}
+                                      }
+                                  }
+                              }
+                          }
+                      }
+                  }
+              })
     async def upload_backtest(data: dict):
         strategy_id = data.get("strategy_id")
         if not strategy_id:
@@ -292,7 +574,7 @@ def create_app() -> FastAPI:
         result = supabase.table("health_alerts").select("*").order("timestamp", desc=True).limit(limit).execute()
         return result.data
 
-    # ---- Market regime endpoint (CORREGIDO: ordena por created_at) ----
+    # ---- Market regime endpoint ----
     @app.get("/market/regime", dependencies=[Depends(verify_token)])
     async def get_market_regime(limit: int = 1):
         result = supabase.table("market_regime").select("*").order("created_at", desc=True).limit(limit).execute()
@@ -325,18 +607,41 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail="No portfolio metrics available")
         return result.data[0] if limit == 1 else result.data
 
-    @app.post("/portfolio/weights", dependencies=[Depends(verify_token)])
+    @app.post("/portfolio/weights", 
+              dependencies=[Depends(verify_token)],
+              openapi_extra={
+                  "requestBody": {
+                      "content": {
+                          "application/json": {
+                              "examples": {
+                                  "weight_40": {
+                                      "summary": "Set 40% weight",
+                                      "value": {
+                                          "strategy_id": "1782168806_TestStrategyMT5",
+                                          "target_weight": 40
+                                      }
+                                  },
+                                  "weight_60": {
+                                      "summary": "Set 60% weight",
+                                      "value": {
+                                          "strategy_id": "another_strategy_id",
+                                          "target_weight": 60
+                                      }
+                                  }
+                              }
+                          }
+                      }
+                  }
+              })
     async def set_portfolio_weights(data: dict):
         """Set or update target weights for a strategy."""
         strategy_id = data.get("strategy_id")
         target_weight = data.get("target_weight")
         if not strategy_id or target_weight is None:
             raise HTTPException(status_code=400, detail="strategy_id and target_weight required")
-        # Verificar que la estrategia existe
         strategy = supabase.table("strategies").select("strategy_id").eq("strategy_id", strategy_id).execute()
         if not strategy.data:
             raise HTTPException(status_code=404, detail="Strategy not found")
-        # Upsert
         supabase.table("portfolio_weights").upsert({
             "strategy_id": strategy_id,
             "target_weight": target_weight,

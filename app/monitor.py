@@ -322,7 +322,7 @@ class PerformanceMonitor:
             if ruin_prob > self.thresholds["portfolio"]["ruin_probability_max"] * 100:
                 alerts.append(f"Ruin probability: {ruin_prob:.2f}% (threshold: {self.thresholds['portfolio']['ruin_probability_max']*100}%)")
         
-        # --- 6. Allocation (new) ---
+        # --- 6. Allocation ---
         weights_result = self.supabase.table("portfolio_weights").select("strategy_id", "target_weight").execute()
         if weights_result.data:
             target_weights = {w["strategy_id"]: w["target_weight"] for w in weights_result.data}
@@ -390,3 +390,59 @@ class PerformanceMonitor:
             logger.warning(f"Portfolio alerts: {len(alerts)}")
         else:
             logger.info("Portfolio metrics OK")
+
+    # ======================== MT5 HEARTBEAT CHECK ========================
+    async def check_mt5_heartbeats(self):
+        """Check MT5 strategies that haven't sent heartbeat in the last 120 seconds and mark them as Stopped."""
+        logger.info("Checking MT5 heartbeats...")
+        
+        now = datetime.utcnow()  # sin zona horaria (offset-naive)
+        timeout_seconds = 120  # 2 minutos sin heartbeat
+        
+        # Obtener estrategias MT5 con state = 'Running'
+        strategies = self.supabase.table("strategies").select("*").eq("platform", "MT5").eq("state", "Running").execute()
+        
+        for strategy in strategies.data:
+            strategy_id = strategy["strategy_id"]
+            last_hb = strategy.get("last_heartbeat")
+            should_stop = False
+            
+            if last_hb:
+                # Convertir a datetime si es string
+                if isinstance(last_hb, str):
+                    try:
+                        # Eliminar 'Z' y reemplazar con '+00:00' para hacer offset-aware
+                        last_hb = datetime.fromisoformat(last_hb.replace('Z', '+00:00'))
+                        # Convertir a offset-naive (sin zona horaria) para comparar con now
+                        last_hb = last_hb.replace(tzinfo=None)
+                    except:
+                        last_hb = None
+                if last_hb:
+                    elapsed = (now - last_hb).total_seconds()
+                    if elapsed > timeout_seconds:
+                        should_stop = True
+                        logger.warning(f"Strategy {strategy_id} - heartbeat timeout: {elapsed:.0f}s")
+            else:
+                # Nunca tuvo heartbeat: si la estrategia tiene más de 120 segundos de antigüedad, detenerla
+                created_at = strategy.get("created_at")
+                if created_at:
+                    if isinstance(created_at, str):
+                        try:
+                            created_at = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
+                            created_at = created_at.replace(tzinfo=None)
+                        except:
+                            created_at = None
+                    if created_at:
+                        elapsed = (now - created_at).total_seconds()
+                        if elapsed > timeout_seconds:
+                            should_stop = True
+                            logger.warning(f"Strategy {strategy_id} - no heartbeat ever, created {elapsed:.0f}s ago")
+            
+            if should_stop:
+                self.supabase.table("strategies").update({
+                    "state": "Stopped",
+                    "updated_at": now.isoformat()
+                }).eq("strategy_id", strategy_id).execute()
+                logger.info(f"Strategy {strategy_id} marked as Stopped due to heartbeat timeout")
+
+        logger.info("MT5 heartbeat check completed")
