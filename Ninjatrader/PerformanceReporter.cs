@@ -1,5 +1,6 @@
 // PerformanceReporter.cs
 using System;
+using System.Collections.Generic;
 using System.Net.Http;
 using System.Text;
 using System.Threading.Tasks;
@@ -21,8 +22,13 @@ namespace NinjaTrader.NinjaScript.Strategies
         [Display(Name = "Auth Token", Description = "Authentication token for backend", Order = 1)]
         public string AuthToken { get; set; } = "miclave123";
 
+        [NinjaScriptProperty]
+        [Display(Name = "Rollover Alert (days)", Description = "Days before expiry to send alert (0 = disabled)", Order = 2)]
+        public int RolloverAlertDays { get; set; } = 5;
+
         private static readonly HttpClient _httpClient = new HttpClient();
         private bool _startReported = false;
+        private Dictionary<string, bool> _rolloverAlertSent = new Dictionary<string, bool>();
 
         protected override void OnStateChange()
         {
@@ -32,11 +38,65 @@ namespace NinjaTrader.NinjaScript.Strategies
             {
                 _startReported = true;
                 ReportStrategyStarted();
+                // ❌ NO se llama a ForceRolloverAlert() – solo lógica real
             }
             else if (State == State.Terminated)
             {
                 ReportStrategyStopped();
             }
+        }
+
+        protected override void OnBarUpdate()
+        {
+            if (State == State.Realtime && Bars != null && Instrument != null)
+            {
+                CheckRollover();
+            }
+        }
+
+        private void CheckRollover()
+        {
+            if (RolloverAlertDays <= 0) return;
+
+            try
+            {
+                DateTime expiry = Instrument.Expiry;
+                if (expiry == DateTime.MinValue) return; // No aplica (acciones, forex, etc.)
+
+                int daysUntilExpiry = (int)(expiry - DateTime.Now).TotalDays;
+
+                if (daysUntilExpiry >= 0 && daysUntilExpiry <= RolloverAlertDays)
+                {
+                    string key = $"Rollover_{Instrument.FullName}";
+                    if (!_rolloverAlertSent.ContainsKey(key) || !_rolloverAlertSent[key])
+                    {
+                        _rolloverAlertSent[key] = true;
+                        string details = $"Instrument {Instrument.FullName} expires in {daysUntilExpiry} days. Please rollover to the next contract.";
+                        Print($"🚨 {details}");
+                        SendHealthAlert("Contract Rollover Approaching", details, "medium");
+                    }
+                }
+                else if (daysUntilExpiry > RolloverAlertDays)
+                {
+                    string key = $"Rollover_{Instrument.FullName}";
+                    if (_rolloverAlertSent.ContainsKey(key))
+                        _rolloverAlertSent[key] = false; // Resetear si la condición ya no se cumple
+                }
+            }
+            catch { }
+        }
+
+        private async void SendHealthAlert(string problemType, string details, string severity = "high")
+        {
+            var data = new
+            {
+                strategy_id = this.Id.ToString(),
+                timestamp = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ"),
+                problem_type = problemType,
+                details = details,
+                severity = severity
+            };
+            await SendToApi("/alerts", data);
         }
 
         private async void ReportStrategyStarted()
@@ -135,8 +195,6 @@ namespace NinjaTrader.NinjaScript.Strategies
                 exit_price = trade.Exit?.Price ?? 0,
                 pnl = trade.ProfitCurrency,
                 direction = trade.Entry.Position.ToString(),
-                // ✨ NUEVO: envía la comisión (costo de transacción) 
-                // Si no está disponible, se enviará 0.
                 cost = trade.Commission
             };
             await SendToApi("/trades", data);
