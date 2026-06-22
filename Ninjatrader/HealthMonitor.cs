@@ -15,7 +15,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 {
     public abstract class HealthMonitor : PerformanceReporter
     {
-        // ---------------------------- Thresholds (editable from UI) ----------------------------
+        // ---------------------------- Thresholds ----------------------------
         private const double MAX_SLIPPAGE_TICKS = 3;
         private const double DRIFT_TOLERANCE = 0.01;
         private const int FREEZE_TIMEOUT_SECONDS = 5;
@@ -27,6 +27,8 @@ namespace NinjaTrader.NinjaScript.Strategies
         private HashSet<string> _partialFilledOrders = new HashSet<string>();
         private bool _isFirstRealtimeBar = true;
         private Dictionary<string, double> _limitOrderPrices = new Dictionary<string, double>();
+        private bool _inactivityAlertSent = false;
+        private DateTime _startTime = DateTime.MinValue;   // Para evitar alertas de conexión al inicio
 
         // --- UI-editable properties ---
         [NinjaScriptProperty]
@@ -43,8 +45,10 @@ namespace NinjaTrader.NinjaScript.Strategies
 
             if (State == State.Realtime)
             {
+                _startTime = DateTime.Now;   // Guardar tiempo de inicio
                 _barsSinceLastTrade = 0;
                 _isFirstRealtimeBar = true;
+                _inactivityAlertSent = false;
 
                 Account acc = Account.All.FirstOrDefault(a => a.Name == "Sim101") ?? Account.All.FirstOrDefault();
                 if (acc != null)
@@ -73,20 +77,23 @@ namespace NinjaTrader.NinjaScript.Strategies
 
         protected override void OnBarUpdate()
         {
-            // 12. Inactive strategy (only if enabled and threshold > 0)
-            if (EnableInactivityAlert && MaxBarsWithoutTrade > 0 && Position.MarketPosition == MarketPosition.Flat)
+            // 12. Inactive strategy (only if enabled, threshold > 0, and there is at least one trade in history)
+            if (EnableInactivityAlert && MaxBarsWithoutTrade > 0 && 
+                Position.MarketPosition == MarketPosition.Flat &&
+                SystemPerformance.AllTrades.Count > 0)   // 🔥 No enviar si nunca ha habido un trade
             {
                 _barsSinceLastTrade++;
-                if (_barsSinceLastTrade >= MaxBarsWithoutTrade)
+                if (_barsSinceLastTrade >= MaxBarsWithoutTrade && !_inactivityAlertSent)
                 {
                     ReportHealthProblem("Inactive strategy", 
                         $"No trade generated in the last {MaxBarsWithoutTrade} bars.");
-                    _barsSinceLastTrade = 0;
+                    _inactivityAlertSent = true;
                 }
             }
             else if (Position.MarketPosition != MarketPosition.Flat)
             {
                 _barsSinceLastTrade = 0;
+                _inactivityAlertSent = false;
             }
 
             // 6. Position drift
@@ -223,6 +230,10 @@ namespace NinjaTrader.NinjaScript.Strategies
 
         protected override void OnConnectionStatusUpdate(ConnectionStatusEventArgs e)
         {
+            // 🔥 No enviar alerta de conexión en los primeros 10 segundos
+            if ((DateTime.Now - _startTime).TotalSeconds < 10)
+                return;
+
             if (e.Status == ConnectionStatus.Connecting || e.Status == ConnectionStatus.Disconnected)
             {
                 _isConnected = false;

@@ -3,6 +3,7 @@ using System;
 using System.ComponentModel.DataAnnotations;
 using NinjaTrader.NinjaScript.Indicators;
 using NinjaTrader.NinjaScript.Strategies;
+using System.Windows.Media;
 
 namespace NinjaTrader.NinjaScript.Strategies
 {
@@ -16,10 +17,11 @@ namespace NinjaTrader.NinjaScript.Strategies
         {
             if (State == State.SetDefaults)
             {
+                // --- Basic strategy information ---
                 Name = "StrategyTemplate";
-                Description = "Your strategy description.";
+                Description = "Template with full health monitoring and rollover alerts.";
 
-                // --- Trading parameters ---
+                // --- Trading parameters (adjust as needed) ---
                 Quantity = 1;
                 StopTicks = 10;
                 TargetTicks = 20;
@@ -28,30 +30,42 @@ namespace NinjaTrader.NinjaScript.Strategies
                 MaxBarsWithoutTrade = 50;      // 0 = disable inactivity alert
                 EnableInactivityAlert = true;
 
+                // --- Rollover alert (days before expiry) ---
+                RolloverAlertDays = 5;         // 5 days before expiry (adjust as needed)
+
                 // --- Technical settings ---
                 Calculate = Calculate.OnBarClose;
                 IsInstantiatedOnEachOptimizationIteration = false;
             }
             else if (State == State.DataLoaded)
             {
-                // Initialize indicators
+                // --- Initialize indicators (example: SMA) ---
                 // mySMA = SMA(20);
+                // mySMA.Plots[0].Brush = Brushes.Goldenrod;
                 // AddChartIndicator(mySMA);
+
+                // --- Initialize any other indicators here ---
             }
+            // ✅ IMPORTANT: Always call base.OnStateChange() for health monitoring & rollover
             base.OnStateChange();
         }
 
         // ================================ MAIN TRADING LOGIC ================================
         protected override void OnBarUpdate()
         {
+            // ✅ IMPORTANT: Call base.OnBarUpdate() for rollover detection to work
+            base.OnBarUpdate();
+
+            // --- Wait for enough bars ---
             if (CurrentBar < BarsRequiredToTrade) return;
 
-            // Optional: Set stop loss and take profit
+            // --- Optional: Set stop loss and take profit (if you don't use SetStopLoss/SetProfitTarget inside conditions) ---
             // SetStopLoss(CalculationMode.Ticks, StopTicks);
             // SetProfitTarget(CalculationMode.Ticks, TargetTicks);
 
-            // ==================== YOUR CODE HERE ====================
+            // ==================== YOUR TRADING CODE GOES HERE ====================
             /*
+            // Example conditions (replace with your own):
             if (BuyCondition)
                 EnterLong(Quantity, "LongEntry");
 
@@ -64,29 +78,30 @@ namespace NinjaTrader.NinjaScript.Strategies
             if (ExitShortCondition)
                 ExitShort("ExitShort", "ShortEntry");
             */
-            // ========================================================
+            // ======================================================================
         }
 
         // ================================ UI-EDITABLE PARAMETERS ================================
+        // --- Trading parameters ---
         [Range(1, 100)]
         [NinjaScriptProperty]
-        [Display(Name = "Quantity", Order = 1, GroupName = "Order Management")]
+        [Display(Name = "Quantity", Description = "Number of contracts per order", Order = 1, GroupName = "Order Management")]
         public int Quantity { get; set; }
 
         [Range(1, 100)]
         [NinjaScriptProperty]
-        [Display(Name = "Stop Loss (ticks)", Order = 2, GroupName = "Order Management")]
+        [Display(Name = "Stop Loss (ticks)", Description = "Stop loss distance in ticks", Order = 2, GroupName = "Order Management")]
         public int StopTicks { get; set; }
 
         [Range(1, 100)]
         [NinjaScriptProperty]
-        [Display(Name = "Take Profit (ticks)", Order = 3, GroupName = "Order Management")]
+        [Display(Name = "Take Profit (ticks)", Description = "Take profit distance in ticks", Order = 3, GroupName = "Order Management")]
         public int TargetTicks { get; set; }
 
-        // Add your own parameters here
+        // --- Add your own parameters here ---
         // [Range(1, 50)]
         // [NinjaScriptProperty]
-        // [Display(Name = "My Period", Order = 4, GroupName = "Custom")]
+        // [Display(Name = "My Period", Description = "Description of your custom parameter", Order = 4, GroupName = "Indicators")]
         // public int MyPeriod { get; set; }
     }
 }

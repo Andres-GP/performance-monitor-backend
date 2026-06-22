@@ -25,9 +25,9 @@ namespace NinjaTrader.NinjaScript.Strategies
                 TargetTicks = 20;
                 Calculate = Calculate.OnBarClose;
                 IsInstantiatedOnEachOptimizationIteration = false;
-                // HealthMonitor settings
                 MaxBarsWithoutTrade = 50;
                 EnableInactivityAlert = true;
+                RolloverAlertDays = 100;  
             }
             else if (State == State.DataLoaded)
             {
@@ -43,6 +43,8 @@ namespace NinjaTrader.NinjaScript.Strategies
 
         protected override void OnBarUpdate()
         {
+            base.OnBarUpdate();
+
             if (CurrentBar < BarsRequiredToTrade) return;
 
             SetStopLoss(CalculationMode.Ticks, StopTicks);

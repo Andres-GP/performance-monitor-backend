@@ -38,7 +38,6 @@ namespace NinjaTrader.NinjaScript.Strategies
             {
                 _startReported = true;
                 ReportStrategyStarted();
-                // ❌ NO se llama a ForceRolloverAlert() – solo lógica real
             }
             else if (State == State.Terminated)
             {
@@ -61,7 +60,7 @@ namespace NinjaTrader.NinjaScript.Strategies
             try
             {
                 DateTime expiry = Instrument.Expiry;
-                if (expiry == DateTime.MinValue) return; // No aplica (acciones, forex, etc.)
+                if (expiry == DateTime.MinValue) return;
 
                 int daysUntilExpiry = (int)(expiry - DateTime.Now).TotalDays;
 
@@ -80,10 +79,13 @@ namespace NinjaTrader.NinjaScript.Strategies
                 {
                     string key = $"Rollover_{Instrument.FullName}";
                     if (_rolloverAlertSent.ContainsKey(key))
-                        _rolloverAlertSent[key] = false; // Resetear si la condición ya no se cumple
+                        _rolloverAlertSent[key] = false;
                 }
             }
-            catch { }
+            catch (Exception ex)
+            {
+                Print($"❌ Rollover error: {ex.Message}");
+            }
         }
 
         private async void SendHealthAlert(string problemType, string details, string severity = "high")
@@ -101,7 +103,6 @@ namespace NinjaTrader.NinjaScript.Strategies
 
         private async void ReportStrategyStarted()
         {
-            // --- Strategy information ---
             string instrumentType = "Unknown";
             string timeframe = "Unknown";
             string dataType = "Real";
@@ -145,7 +146,6 @@ namespace NinjaTrader.NinjaScript.Strategies
             }
             catch { }
 
-            // --- Report strategy start ---
             var data = new
             {
                 strategy_id = this.Id.ToString(),
