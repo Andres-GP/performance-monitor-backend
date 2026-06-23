@@ -84,50 +84,6 @@ A production-ready **backend API** for monitoring trading strategy performance a
 
 ---
 
-## 📁 Project Structure
-
-performance-monitor-backend/
-├── .github/workflows/
-│ ├── ci.yml # Continuous Integration (tests, linting, security)
-│ └── cd.yml # Continuous Deployment (Render)
-├── app/
-│ ├── analytics/
-│ │ ├── edge.py # Edge health metrics
-│ │ ├── metrics.py # Performance metrics calculations
-│ │ ├── portfolio.py # Portfolio-level analytics
-│ │ └── regime.py # Market regime detection
-│ ├── utils/
-│ │ └── logger.py # Logging configuration
-│ ├── init.py
-│ ├── api.py # FastAPI endpoints (strategies, trades, alerts, etc.)
-│ ├── config.py # Application configuration (Pydantic Settings)
-│ ├── main.py # Application entry point (API + WebSocket + Scheduler)
-│ ├── models.py # Pydantic data models
-│ ├── monitor.py # Performance monitor (daily, weekly, monthly checks)
-│ ├── scheduler.py # Task scheduler (APScheduler)
-│ ├── supabase_client.py # Supabase client wrapper
-│ └── websocket_server.py # WebSocket server
-├── tests/
-│ ├── integration/ # Integration tests
-│ │ ├── test_api.py # API endpoint tests
-│ │ ├── test_monitor.py # PerformanceMonitor tests
-│ │ └── test_websocket.py # WebSocket tests
-│ ├── unit/ # Unit tests
-│ │ ├── test_edge.py # Edge analytics tests
-│ │ ├── test_metrics.py # Metrics tests
-│ │ ├── test_regime.py # Regime analytics tests
-│ │ ├── test_scheduler.py # Scheduler tests
-│ │ └── test_supabase_client.py # Supabase client tests
-│ ├── init.py
-│ └── conftest.py # Pytest fixtures (mocks, client, auth)
-├── .env.example # Environment variables template
-├── .python-version # Python version for Render
-├── pytest.ini # Pytest configuration
-├── requirements.txt # Python dependencies
-└── README.md # This file
-
----
-
 ## 🔗 API Endpoints
 
 ### 📌 Authentication
