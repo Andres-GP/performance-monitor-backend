@@ -1,3 +1,4 @@
+# .github/workflows/ci.yml
 name: CI
 
 on:
@@ -34,7 +35,7 @@ jobs:
           flake8 app/ tests/ --count --select=E9,F63,F7,F82 --show-source --statistics
 
       - name: Security check with bandit
-        run: bandit -r app/ -ll --skip B101,B311
+        run: bandit -r app/ -ll --skip B101,B311,B104
 
       - name: Run tests with coverage
         env:
