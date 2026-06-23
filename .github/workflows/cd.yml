@@ -1,3 +1,4 @@
+# .github/workflows/cd.yml
 name: CD
 
 on:
@@ -27,24 +28,58 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Deploy to Render
+      - name: Deploy to Render (using API)
         id: deploy
-        uses: render-oss/render-deploy@v1
-        with:
-          service-id: ${{ github.ref_name == 'main' && secrets.RENDER_SERVICE_ID_PROD || github.ref_name == 'staging' && secrets.RENDER_SERVICE_ID_STAGING }}
-          api-key: ${{ secrets.RENDER_API_KEY }}
-          wait: true
-
-      - name: Health check (optional)
-        if: always()
         run: |
-          if [ "${{ job.status }}" == "success" ]; then
-            echo "Deployment successful to ${{ github.ref_name }}"
-            # Opcional: curl a la URL de health para verificar
+          # Determinar service ID según la rama
+          if [ "${{ github.ref_name }}" == "main" ]; then
+            SERVICE_ID="${{ secrets.RENDER_SERVICE_ID_PROD }}"
+          elif [ "${{ github.ref_name }}" == "staging" ]; then
+            SERVICE_ID="${{ secrets.RENDER_SERVICE_ID_STAGING }}"
           else
-            echo "Deployment failed"
+            echo "Branch not for deployment"
             exit 1
           fi
+
+          # Llamar a la API de Render para triggerear el deploy
+          RESPONSE=$(curl -s -X POST \
+            -H "Authorization: Bearer ${{ secrets.RENDER_API_KEY }}" \
+            -H "Content-Type: application/json" \
+            -d '{"clearCache": false}' \
+            "https://api.render.com/v1/services/$SERVICE_ID/deploys")
+
+          # Extraer la URL de la nueva deploy
+          DEPLOY_URL=$(echo "$RESPONSE" | jq -r '.deploy.url')
+          echo "url=$DEPLOY_URL" >> $GITHUB_OUTPUT
+          echo "Deploy triggered: $DEPLOY_URL"
+
+      - name: Wait for deployment to complete (optional)
+        run: |
+          # Esperar 60 segundos para que Render termine el deploy
+          sleep 60
+          echo "Deployment likely completed"
+
+      - name: Health check
+        run: |
+          # Obtener la URL del servicio según la rama
+          if [ "${{ github.ref_name }}" == "main" ]; then
+            URL="https://performance-monitor-backend.onrender.com/health"
+          elif [ "${{ github.ref_name }}" == "staging" ]; then
+            URL="https://performance-monitor-backend-staging.onrender.com/health"
+          else
+            exit 0
+          fi
+
+          for i in {1..10}; do
+            if curl -f -s -o /dev/null "$URL"; then
+              echo "✅ Service is healthy"
+              exit 0
+            fi
+            echo "Waiting for service to be ready... ($i/10)"
+            sleep 5
+          done
+          echo "❌ Service not ready after 50 seconds"
+          exit 1
 
       - name: Notify deployment status
         if: always()
