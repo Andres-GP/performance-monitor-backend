@@ -1,0 +1,52 @@
+name: CD
+
+on:
+  push:
+    branches:
+      - staging
+      - main
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Environment to deploy to"
+        required: true
+        default: "staging"
+        type: choice
+        options:
+          - staging
+          - production
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ github.ref_name == 'main' && 'production' || github.ref_name == 'staging' && 'staging' || 'development' }}
+      url: ${{ steps.deploy.outputs.url }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Deploy to Render
+        id: deploy
+        uses: render-oss/render-deploy@v1
+        with:
+          service-id: ${{ github.ref_name == 'main' && secrets.RENDER_SERVICE_ID_PROD || github.ref_name == 'staging' && secrets.RENDER_SERVICE_ID_STAGING }}
+          api-key: ${{ secrets.RENDER_API_KEY }}
+          wait: true
+
+      - name: Health check (optional)
+        if: always()
+        run: |
+          if [ "${{ job.status }}" == "success" ]; then
+            echo "Deployment successful to ${{ github.ref_name }}"
+            # Opcional: curl a la URL de health para verificar
+          else
+            echo "Deployment failed"
+            exit 1
+          fi
+
+      - name: Notify deployment status
+        if: always()
+        run: |
+          echo "Deployment to ${{ github.ref_name }} completed with status: ${{ job.status }}"
