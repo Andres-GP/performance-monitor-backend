@@ -26,6 +26,8 @@ private:
    bool              m_inactivityAlertSent;
    int               m_maxBarsWithoutTrade;
    bool              m_enableInactivityAlert;
+   int               m_rolloverAlertDays;
+   bool              m_rolloverAlertSent;
 
    string            SendPostRequest(string endpoint, string jsonPayload);
    string            FormatISODate(datetime dt);
@@ -39,6 +41,7 @@ public:
    void              ReportHealthAlert(string problemType, string details, string severity = "high");
    void              ReportCapital(double capital, string currency = "USD");
    void              SendHeartbeat();
+   void              CheckRollover();                    // ✅ AHORA ES PÚBLICO
 
    void              OnBarUpdate(int barsTotal);
    void              OnOrderRejected(string orderName, int errorCode, string comment);
@@ -48,6 +51,7 @@ public:
 
    void              SetMaxBarsWithoutTrade(int bars) { m_maxBarsWithoutTrade = bars; }
    void              EnableInactivityAlert(bool enable) { m_enableInactivityAlert = enable; }
+   void              SetRolloverAlertDays(int days) { m_rolloverAlertDays = days; }
 };
 
 //+------------------------------------------------------------------+
@@ -65,7 +69,9 @@ PerformanceReporter::PerformanceReporter(string backendUrl, string authToken, st
      m_barsWithoutTrade(0),
      m_inactivityAlertSent(false),
      m_maxBarsWithoutTrade(50),
-     m_enableInactivityAlert(true)
+     m_enableInactivityAlert(true),
+     m_rolloverAlertDays(5),
+     m_rolloverAlertSent(false)
 {
    m_platform = "MT5";
    m_strategyId = IntegerToString(TimeCurrent()) + "_" + strategyName;
@@ -101,7 +107,6 @@ string PerformanceReporter::SendPostRequest(string endpoint, string jsonPayload)
    string resultHeaders;
    int res;
 
-   // ✅ CORREGIDO: usar StringLen para evitar el terminador nulo
    int dataSize = StringLen(jsonPayload);
    StringToCharArray(jsonPayload, postData, 0, dataSize);
 
@@ -115,6 +120,28 @@ string PerformanceReporter::SendPostRequest(string endpoint, string jsonPayload)
    }
 
    return CharArrayToString(resultData);
+}
+
+//+------------------------------------------------------------------+
+//| Checks rollover and sends alert if needed                        |
+//+------------------------------------------------------------------+
+void PerformanceReporter::CheckRollover()
+{
+   if(m_rolloverAlertDays <= 0) return;
+   if(m_rolloverAlertSent) return;
+
+   datetime expiry = (datetime)SymbolInfoInteger(_Symbol, SYMBOL_EXPIRATION_TIME);
+   if(expiry == 0) return;
+
+   int daysUntilExpiry = (int)((expiry - TimeCurrent()) / 86400);
+
+   if(daysUntilExpiry >= 0 && daysUntilExpiry <= m_rolloverAlertDays)
+   {
+      m_rolloverAlertSent = true;
+      string details = StringFormat("Symbol %s expires in %d days. Please rollover to the next contract.", _Symbol, daysUntilExpiry);
+      Print("[INFO] Rollover alert: ", details);
+      ReportHealthAlert("Contract Rollover Approaching", details, "medium");
+   }
 }
 
 //+------------------------------------------------------------------+
@@ -259,6 +286,7 @@ void PerformanceReporter::SendHeartbeat()
 //+------------------------------------------------------------------+
 void PerformanceReporter::OnBarUpdate(int barsTotal)
 {
+   // Inactivity monitoring
    if(!m_enableInactivityAlert || m_maxBarsWithoutTrade <= 0) return;
 
    if(PositionsTotal() > 0)
