@@ -17,7 +17,7 @@
 //+------------------------------------------------------------------+
 //--- Backend configuration
 input string   Inp_BackendUrl   = "https://laxative-buckskin-gyration.ngrok-free.dev";   // Backend URL
-input string   Inp_AuthToken    = "6d84e658780b073a7a66643135247494094bb63d0474b558c55fe002ce296920"; // Auth Token
+input string   Inp_AuthToken    = ""; // Auth Token
 
 //--- Monitoring settings
 input bool     Inp_EnableInactivity = true;      // Enable inactivity alert
