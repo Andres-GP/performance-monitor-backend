@@ -1,6 +1,6 @@
 //+------------------------------------------------------------------+
 //|                                                TestStrategy.mq5  |
-//|                   Test strategy with heartbeat                   |
+//|                   Test strategy with heartbeat + rollover        |
 //+------------------------------------------------------------------+
 #property copyright "AlphaCapital"
 #property version   "1.00"
@@ -16,6 +16,7 @@ input double   Inp_LotSize         = 0.1;
 input int      Inp_TimerSeconds    = 30;
 input int      Inp_MagicNumber     = 1000;
 input bool     Inp_EnableInactivity = true;
+input int      Inp_RolloverAlertDays = 60;   // ✅ NUEVO: días antes de expiración
 
 //--- Global variables
 PerformanceReporter *g_reporter = NULL;
@@ -50,6 +51,7 @@ int OnInit()
    {
       g_reporter.SetMaxBarsWithoutTrade(50);
       g_reporter.EnableInactivityAlert(Inp_EnableInactivity);
+      g_reporter.SetRolloverAlertDays(Inp_RolloverAlertDays);   // ✅ Configurar días
       g_reporter.ReportStrategyStarted();
       
       double capital = AccountInfoDouble(ACCOUNT_BALANCE);
@@ -83,6 +85,10 @@ void OnDeinit(const int reason)
 void OnTick()
 {
    if(CheckPointer(g_reporter) == POINTER_INVALID) return;
+   
+   // ✅ Verificar rollover en cada tick
+   g_reporter.CheckRollover();
+   
    int currentBars = Bars(_Symbol, _Period);
    if(currentBars != g_barsCount && currentBars > 0)
    {
@@ -136,8 +142,11 @@ void OnTimer()
 {
    if(CheckPointer(g_reporter) == POINTER_INVALID) return;
    
-   //--- ✅ ENVIAR HEARTBEAT CADA 30 SEGUNDOS ---
+   //--- ✅ Heartbeat cada 30 segundos ---
    g_reporter.SendHeartbeat();
+   
+   // ✅ Verificar rollover también en el timer (por si acaso)
+   g_reporter.CheckRollover();
    
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
