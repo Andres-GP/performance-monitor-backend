@@ -22,6 +22,7 @@ input string   Inp_AuthToken    = "6d84e658780b073a7a66643135247494094bb63d0474b
 //--- Monitoring settings
 input bool     Inp_EnableInactivity = true;      // Enable inactivity alert
 input int      Inp_MaxBarsWithoutTrade = 50;     // Bars without trade before alert
+input int      Inp_RolloverAlertDays = 60;       // 🔥 NEW: Days before expiry to send alert (0 = disabled)
 
 //--- Trading parameters
 input double   Inp_LotSize      = 0.1;           // Lot size
@@ -84,6 +85,7 @@ int OnInit()
    //--- Configurar monitoreo
    g_reporter.SetMaxBarsWithoutTrade(Inp_MaxBarsWithoutTrade);
    g_reporter.EnableInactivityAlert(Inp_EnableInactivity);
+   g_reporter.SetRolloverAlertDays(Inp_RolloverAlertDays);   // 🔥 CONFIGURAR DÍAS
    
    //--- Reportar inicio y capital
    g_reporter.ReportStrategyStarted();
@@ -131,6 +133,9 @@ void OnDeinit(const int reason)
 void OnTick()
 {
    if(CheckPointer(g_reporter) == POINTER_INVALID) return;
+   
+   // 🔥 VERIFICAR ROLLOVER EN CADA TICK
+   g_reporter.CheckRollover();
    
    //--- Monitoreo de inactividad
    int currentBars = Bars(_Symbol, _Period);
@@ -236,6 +241,9 @@ void OnTrade()
 void OnTimer()
 {
    if(CheckPointer(g_reporter) == POINTER_INVALID) return;
+   
+   // 🔥 VERIFICAR ROLLOVER EN EL TIMER (por si acaso)
+   g_reporter.CheckRollover();
    
    if(Inp_UseTimer)
       ExecuteTradingLogic();
