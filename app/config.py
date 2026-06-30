@@ -14,4 +14,6 @@ class Settings(BaseSettings):
 
     API_SECRET_KEY: str = os.getenv("API_SECRET_KEY", "changeme")
 
+    CLERK_SECRET_KEY: str = os.getenv("CLERK_SECRET_KEY", "")
+
 settings = Settings()
