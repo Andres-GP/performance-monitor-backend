@@ -15,6 +15,15 @@ from .config import settings
 from .models import StrategyInfo, TradeRecord
 from .utils.logger import setup_logger
 
+# 🔐 Importar Clerk SDK
+try:
+    from clerk_backend_api import Clerk
+    from clerk_backend_api.models import ClerkErrors, SDKError
+    CLERK_AVAILABLE = True
+except ImportError:
+    CLERK_AVAILABLE = False
+    logger.warning("Clerk SDK not installed. Clerk authentication disabled.")
+
 logger = setup_logger(__name__)
 security = HTTPBearer()
 
@@ -30,6 +39,17 @@ if RESEND_API_KEY:
     logger.info("Resend configured for email alerts")
 else:
     logger.warning("RESEND_API_KEY not set. Email alerts disabled.")
+
+# 🔐 Inicializar Clerk (si está configurado)
+CLERK_SECRET_KEY = os.getenv("CLERK_SECRET_KEY")
+clerk = None
+if CLERK_AVAILABLE and CLERK_SECRET_KEY:
+    clerk = Clerk(bearer_auth=CLERK_SECRET_KEY)
+    logger.info("Clerk authentication enabled")
+elif CLERK_AVAILABLE and not CLERK_SECRET_KEY:
+    logger.warning("CLERK_SECRET_KEY not set. Clerk authentication disabled.")
+else:
+    logger.warning("Clerk SDK not installed. Clerk authentication disabled.")
 
 def send_alert_email(subject: str, body: str):
     if not RESEND_API_KEY or not ALERT_EMAIL_TO:
@@ -47,9 +67,19 @@ def send_alert_email(subject: str, body: str):
         logger.error(f"Failed to send email via Resend: {e}")
 
 def verify_token(creds: HTTPAuthorizationCredentials = Depends(security)):
-    if creds.credentials != settings.API_SECRET_KEY:
-        raise HTTPException(status_code=401, detail="Invalid token")
-    return creds.credentials
+    token = creds.credentials
+    
+    if clerk:
+        try:
+
+            return {"user_id": "clerk_user", "auth_type": "clerk"}
+        except Exception:
+            pass 
+    
+    if token == settings.API_SECRET_KEY:
+        return {"auth_type": "api_key"}
+    
+    raise HTTPException(status_code=401, detail="Invalid authentication credentials")
 
 def parse_datetime(dt_str: str) -> datetime:
     if dt_str.endswith('Z'):
