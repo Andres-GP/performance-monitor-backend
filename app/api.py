@@ -1,8 +1,11 @@
 # api.py
 import json
 import os
+import jwt
+import requests
 from datetime import datetime, timedelta
 from typing import Optional
+from jwt.exceptions import PyJWTError
 
 import resend
 from fastapi import FastAPI, Depends, HTTPException, Request, WebSocket, WebSocketDisconnect
@@ -31,6 +34,66 @@ if RESEND_API_KEY:
 else:
     logger.warning("RESEND_API_KEY not set. Email alerts disabled.")
 
+# Clerk configuration (con PyJWT)
+CLERK_JWKS_URL = os.getenv("CLERK_JWKS_URL", "https://your-clerk-project.clerk.accounts.dev/.well-known/jwks.json")
+CLERK_ISSUER = os.getenv("CLERK_ISSUER", "https://your-clerk-project.clerk.accounts.dev")
+_jwks_cache = None
+_jwks_cache_time = None
+
+def get_jwks():
+    """Obtiene y cachea las claves JWKS de Clerk."""
+    global _jwks_cache, _jwks_cache_time
+    # Cache por 1 hora
+    if _jwks_cache and (datetime.utcnow() - _jwks_cache_time).seconds < 3600:
+        return _jwks_cache
+    try:
+        response = requests.get(CLERK_JWKS_URL)
+        response.raise_for_status()
+        _jwks_cache = response.json()
+        _jwks_cache_time = datetime.utcnow()
+        return _jwks_cache
+    except Exception as e:
+        logger.error(f"Failed to fetch JWKS: {e}")
+        return None
+
+def verify_clerk_token(token: str):
+    """Verifica un token JWT de Clerk usando JWKS."""
+    try:
+        jwks = get_jwks()
+        if not jwks:
+            raise Exception("JWKS not available")
+        
+        # Obtener el kid del header
+        unverified_header = jwt.get_unverified_header(token)
+        kid = unverified_header.get('kid')
+        if not kid:
+            raise Exception("No kid in token header")
+        
+        # Buscar la clave correspondiente
+        key_data = None
+        for key in jwks.get('keys', []):
+            if key.get('kid') == kid:
+                key_data = key
+                break
+        
+        if not key_data:
+            raise Exception("No matching key found in JWKS")
+        
+        # Construir la clave pública RSA
+        public_key = jwt.algorithms.RSAAlgorithm.from_jwk(json.dumps(key_data))
+        
+        # Verificar el token
+        payload = jwt.decode(
+            token,
+            public_key,
+            algorithms=["RS256"],
+            issuer=CLERK_ISSUER,
+            options={"verify_aud": False}  # Si no usas audiencia específica
+        )
+        return payload
+    except PyJWTError as e:
+        raise Exception(f"Invalid token: {e}")
+
 def send_alert_email(subject: str, body: str):
     if not RESEND_API_KEY or not ALERT_EMAIL_TO:
         logger.warning("Email not configured. Skipping alert email.")
@@ -46,10 +109,27 @@ def send_alert_email(subject: str, body: str):
     except Exception as e:
         logger.error(f"Failed to send email via Resend: {e}")
 
+# 🔐 AUTENTICACIÓN DUAL: Clerk (frontend) + API Key (NT8/MT5)
 def verify_token(creds: HTTPAuthorizationCredentials = Depends(security)):
-    if creds.credentials != settings.API_SECRET_KEY:
-        raise HTTPException(status_code=401, detail="Invalid token")
-    return creds.credentials
+    token = creds.credentials
+    
+    # 1️⃣ Intentar validar como token de Clerk
+    try:
+        payload = verify_clerk_token(token)
+        user_id = payload.get("sub")
+        logger.info(f"Authenticated via Clerk: user_id={user_id}")
+        return {"user_id": user_id, "auth_type": "clerk"}
+    except Exception as e:
+        logger.debug(f"Clerk validation failed: {e}")
+        # Si falla, continuar con API key
+    
+    # 2️⃣ Validar como API_SECRET_KEY (legacy para NT8/MT5)
+    if token == settings.API_SECRET_KEY:
+        logger.debug("Authenticated via API_SECRET_KEY")
+        return {"auth_type": "api_key"}
+    
+    # 3️⃣ Si ninguna funciona, rechazar
+    raise HTTPException(status_code=401, detail="Invalid authentication credentials")
 
 def parse_datetime(dt_str: str) -> datetime:
     if dt_str.endswith('Z'):
