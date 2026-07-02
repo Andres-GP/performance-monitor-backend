@@ -1,9 +1,43 @@
-# analytics/regime.py
 import numpy as np
 import pandas as pd
 import yfinance as yf
 from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional
+import logging
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+def calculate_adx(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> pd.Series:
+    """
+    Calcula el ADX de forma vectorizada usando pandas/numpy.
+    Devuelve una Serie con el ADX para cada fecha.
+    """
+    # True Range
+    tr1 = high - low
+    tr2 = (high - close.shift()).abs()
+    tr3 = (low - close.shift()).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.rolling(period).mean()
+
+    # Directional Movement
+    up_move = high - high.shift()
+    down_move = low.shift() - low
+
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+
+    plus_dm_series = pd.Series(plus_dm, index=high.index)
+    minus_dm_series = pd.Series(minus_dm, index=high.index)
+
+    # +DI y -DI
+    plus_di = 100 * (plus_dm_series.rolling(period).mean() / atr)
+    minus_di = 100 * (minus_dm_series.rolling(period).mean() / atr)
+
+    # DX y ADX
+    dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di)
+    adx = dx.rolling(period).mean()
+    return adx
 
 def get_adx(symbol: str = "SPY", period: int = 14) -> float:
     """
@@ -12,23 +46,19 @@ def get_adx(symbol: str = "SPY", period: int = 14) -> float:
     """
     try:
         data = yf.download(symbol, period="60d", interval="1d", progress=False)
-        if data.empty:
+        if data.empty or len(data) < period + 10:
+            logger.warning(f"ADX: Insufficient data for {symbol}")
             return 25.0
-        
-        high = data['High']
-        low = data['Low']
-        close = data['Close']
-        
-        # Simple ADX calculation (placeholder for full implementation)
-        # In production, use TA-Lib or a proper vectorized calculation
-        tr = np.maximum(high - low, np.maximum(abs(high - close.shift()), abs(low - close.shift())))
-        atr = tr.rolling(period).mean()
-        
-        # Placeholder: return a neutral value if we can't compute properly
-        return 25.0
+
+        adx = calculate_adx(data['High'], data['Low'], data['Close'], period)
+        if adx.dropna().empty:
+            return 25.0
+
+        return float(adx.iloc[-1])
     except Exception as e:
-        print(f"Error getting ADX: {e}")
+        logger.error(f"Error calculating ADX for {symbol}: {e}")
         return 25.0
+
 
 def get_vix_percentile() -> float:
     """VIX percentile over last 252 trading days. Returns 50.0 as fallback."""
@@ -67,7 +97,6 @@ def get_advance_decline_ratio() -> float:
     Returns 1.0 (neutral) as fallback.
     """
     try:
-        # Using NYSE Advance/Decline indices (if available)
         adv = yf.download("^NYAD", period="5d", interval="1d", progress=False)['Close']
         dec = yf.download("^NYDEC", period="5d", interval="1d", progress=False)['Close']
         if adv.empty or dec.empty or adv.iloc[-1] == 0:
@@ -101,14 +130,13 @@ def get_correlation(symbol1: str, symbol2: str, period_days: int = 30) -> float:
     """
     try:
         end = datetime.now()
-        start = end - timedelta(days=period_days * 2)  # Extra days for padding
+        start = end - timedelta(days=period_days * 2)
         data1 = yf.download(symbol1, start=start, end=end, interval="1d", progress=False)['Close']
         data2 = yf.download(symbol2, start=start, end=end, interval="1d", progress=False)['Close']
         
         if data1.empty or data2.empty:
             return 0.0
         
-        # Align data and calculate correlation on last period_days
         combined = pd.concat([data1, data2], axis=1, join='inner').dropna()
         combined.columns = [symbol1, symbol2]
         
