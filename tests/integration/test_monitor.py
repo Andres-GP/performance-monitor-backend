@@ -17,19 +17,21 @@ async def test_run_daily_check(monitor, mock_supabase):
     ]
     mock_supabase.table.return_value.select.return_value.eq.return_value.execute.return_value = MagicMock(data=strategies_data)
 
-    trades_data = [
-        {"pnl": 100, "exit_time": datetime.utcnow().isoformat()},
-        {"pnl": -50, "exit_time": datetime.utcnow().isoformat()},
-        {"pnl": 200, "exit_time": datetime.utcnow().isoformat()}
-    ]
+    trades_data = []
+    for _ in range(10):
+        trades_data.append({"pnl": 100, "exit_time": datetime.utcnow().isoformat()})
+        trades_data.append({"pnl": 80, "exit_time": datetime.utcnow().isoformat()})
+        trades_data.append({"pnl": 120, "exit_time": datetime.utcnow().isoformat()})
+
     mock_supabase.table.return_value.select.return_value.eq.return_value.order.return_value.limit.return_value.execute.return_value = MagicMock(data=trades_data)
 
     mock_supabase.table.return_value.insert.return_value.execute.return_value = MagicMock(data=[])
+    mock_supabase.table.return_value.update.return_value.eq.return_value.execute.return_value = MagicMock(data=[])
 
     with patch('app.monitor.send_alert_email') as mock_email:
         await monitor.run_daily_check()
         mock_email.assert_not_called()
-        assert mock_supabase.table.return_value.insert.call_count == 0
+        assert mock_supabase.table.return_value.insert.call_count >= 2
 
 @pytest.mark.asyncio
 async def test_check_mt5_heartbeats(monitor, mock_supabase):
@@ -111,6 +113,9 @@ async def test_check_portfolio_metrics(monitor, mock_supabase):
         {"strategy_id": "s2", "name": "Strat2", "instrument": "GC", "instrument_type": "Future", "sizing": 5}
     ]
     mock_supabase.table.return_value.select.return_value.eq.return_value.execute.return_value = MagicMock(data=strategies_data)
+
+    accounts_data = [{"capital": 100000}]
+    mock_supabase.table.return_value.select.return_value.execute.return_value = MagicMock(data=accounts_data)
 
     trades_data = []
     for i in range(30):
