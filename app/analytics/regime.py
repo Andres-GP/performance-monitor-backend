@@ -2,25 +2,47 @@ import numpy as np
 import pandas as pd
 import yfinance as yf
 from datetime import datetime, timedelta
-from typing import List, Dict, Any, Optional
+from typing import Dict, Any
 import logging
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+FUTURE_TO_YF = {
+    "ES": "ES=F",
+    "GC": "GC=F",
+    "NQ": "NQ=F",
+    "CL": "CL=F",
+    "NG": "NG=F",
+    "ZB": "ZB=F",
+    "ZN": "ZN=F",
+    "ZF": "ZF=F",
+    "ZT": "ZT=F",
+}
+
+FUTURE_TO_ETF = {
+    "ES": "SPY",
+    "GC": "GLD",
+    "NQ": "QQQ",
+    "CL": "USO",
+    "NG": "UNG",
+    "ZB": "TLT",
+    "ZN": "TLT",
+    "ZF": "TLT",
+    "ZT": "TLT",
+}
 
 def calculate_adx(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> pd.Series:
     """
     Calcula el ADX de forma vectorizada usando pandas/numpy.
     Devuelve una Serie con el ADX para cada fecha.
     """
-    # True Range
     tr1 = high - low
     tr2 = (high - close.shift()).abs()
     tr3 = (low - close.shift()).abs()
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr = tr.rolling(period).mean()
 
-    # Directional Movement
     up_move = high - high.shift()
     down_move = low.shift() - low
 
@@ -30,11 +52,9 @@ def calculate_adx(high: pd.Series, low: pd.Series, close: pd.Series, period: int
     plus_dm_series = pd.Series(plus_dm, index=high.index)
     minus_dm_series = pd.Series(minus_dm, index=high.index)
 
-    # +DI y -DI
     plus_di = 100 * (plus_dm_series.rolling(period).mean() / atr)
     minus_di = 100 * (minus_dm_series.rolling(period).mean() / atr)
 
-    # DX y ADX
     dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di)
     adx = dx.rolling(period).mean()
     return adx
@@ -59,7 +79,6 @@ def get_adx(symbol: str = "SPY", period: int = 14) -> float:
         logger.error(f"Error calculating ADX for {symbol}: {e}")
         return 25.0
 
-
 def get_vix_percentile() -> float:
     """VIX percentile over last 252 trading days. Returns 50.0 as fallback."""
     try:
@@ -70,7 +89,7 @@ def get_vix_percentile() -> float:
         percentile = (vix < current).sum() / len(vix) * 100
         return float(percentile)
     except Exception as e:
-        print(f"Error getting VIX percentile: {e}")
+        logger.error(f"Error getting VIX percentile: {e}")
         return 50.0
 
 def get_atr_percentile(symbol: str = "SPY", period: int = 14) -> float:
@@ -88,7 +107,7 @@ def get_atr_percentile(symbol: str = "SPY", period: int = 14) -> float:
         percentile = (atr < current_atr).sum() / len(atr) * 100
         return float(percentile)
     except Exception as e:
-        print(f"Error getting ATR percentile: {e}")
+        logger.error(f"Error getting ATR percentile: {e}")
         return 50.0
 
 def get_advance_decline_ratio() -> float:
@@ -104,7 +123,7 @@ def get_advance_decline_ratio() -> float:
         ratio = adv.iloc[-1] / dec.iloc[-1]
         return float(ratio)
     except Exception as e:
-        print(f"Error getting Advance/Decline Ratio: {e}")
+        logger.error(f"Error getting Advance/Decline Ratio: {e}")
         return 1.0
 
 def get_nh_nl_ratio() -> float:
@@ -120,7 +139,7 @@ def get_nh_nl_ratio() -> float:
         ratio = nh.iloc[-1] / nl.iloc[-1]
         return float(ratio)
     except Exception as e:
-        print(f"Error getting NH/NL Ratio: {e}")
+        logger.error(f"Error getting NH/NL Ratio: {e}")
         return 1.0
 
 def get_correlation(symbol1: str, symbol2: str, period_days: int = 30) -> float:
@@ -146,29 +165,47 @@ def get_correlation(symbol1: str, symbol2: str, period_days: int = 30) -> float:
         corr = combined.iloc[-period_days:].corr().iloc[0, 1]
         return float(corr) if not np.isnan(corr) else 0.0
     except Exception as e:
-        print(f"Error calculating correlation {symbol1} vs {symbol2}: {e}")
+        logger.error(f"Error calculating correlation {symbol1} vs {symbol2}: {e}")
         return 0.0
 
 def get_average_daily_volume(symbol: str) -> float:
     """
-    Get average daily volume (20 days) for a given symbol.
-    Returns 0.0 if data is unavailable.
+    Obtiene el volumen promedio diario de los últimos 20 días.
+    Si el símbolo es un futuro, usa el ticker con '=F'.
+    Si falla, intenta con el ETF equivalente.
+    Si todo falla, devuelve 0.0.
     """
-    try:
-        data = yf.download(symbol, period="1mo", interval="1d", progress=False)
-        if data.empty:
-            return 0.0
-        avg_volume = data['Volume'].mean()
-        return float(avg_volume) if not np.isnan(avg_volume) else 0.0
-    except Exception as e:
-        print(f"Error getting volume for {symbol}: {e}")
-        return 0.0
+    symbol = symbol.strip().upper()
     
+    tickers_to_try = []
+    
+    if symbol in FUTURE_TO_YF:
+        tickers_to_try.append(FUTURE_TO_YF[symbol])
+    else:
+        tickers_to_try.append(symbol)
+    
+    if symbol in FUTURE_TO_ETF:
+        tickers_to_try.append(FUTURE_TO_ETF[symbol])
+    
+    for ticker in tickers_to_try:
+        try:
+            data = yf.download(ticker, period="1mo", interval="1d", progress=False)
+            if not data.empty:
+                avg_volume = data['Volume'].mean()
+                if not np.isnan(avg_volume) and avg_volume > 0:
+                    logger.debug(f"Volume for {symbol} using {ticker}: {avg_volume}")
+                    return float(avg_volume)
+        except Exception as e:
+            logger.warning(f"Failed to get volume for {ticker}: {e}")
+            continue
+    
+    logger.warning(f"No volume data found for {symbol} (tried {tickers_to_try})")
+    return 0.0
+
 def get_regime_summary(adx: float, vix_percentile: float, atr_percentile: float) -> Dict[str, Any]:
     """
     Return a complete market regime summary with all indicators.
     """
-    # --- Trend regime (ADX) ---
     if adx < 20:
         trend = "sideways"
         trend_description = "Range-bound market (mean reversion favorable)"
@@ -179,7 +216,6 @@ def get_regime_summary(adx: float, vix_percentile: float, atr_percentile: float)
         trend = "transition"
         trend_description = "Transition between range and trend"
 
-    # --- Fear regime (VIX) ---
     if vix_percentile > 80:
         fear = "extreme_fear"
         fear_description = "Extreme fear (historical upside bias)"
@@ -190,7 +226,6 @@ def get_regime_summary(adx: float, vix_percentile: float, atr_percentile: float)
         fear = "normal"
         fear_description = "Normal fear levels"
 
-    # --- Volatility regime (ATR) ---
     if atr_percentile > 70:
         volatility = "high"
         volatility_description = "High volatility (wider stops, smaller sizing)"
@@ -201,7 +236,6 @@ def get_regime_summary(adx: float, vix_percentile: float, atr_percentile: float)
         volatility = "normal"
         volatility_description = "Normal volatility"
 
-    # --- Breadth (Advance/Decline Ratio) ---
     adv_dec_ratio = get_advance_decline_ratio()
     if adv_dec_ratio > 2.0:
         breadth = "strong_upside"
@@ -213,7 +247,6 @@ def get_regime_summary(adx: float, vix_percentile: float, atr_percentile: float)
         breadth = "neutral"
         breadth_description = "Neutral breadth (balanced market)"
 
-    # --- Strength (New Highs/Lows Ratio) ---
     nh_nl_ratio = get_nh_nl_ratio()
     if nh_nl_ratio > 3.0:
         strength = "strong"
@@ -225,23 +258,19 @@ def get_regime_summary(adx: float, vix_percentile: float, atr_percentile: float)
         strength = "neutral"
         strength_description = "Neutral market strength"
 
-    # --- Correlations ---
     corr_spy_qqq = get_correlation("SPY", "QQQ")
     corr_spy_tlt = get_correlation("SPY", "TLT")
 
     return {
-        # Core indicators
         "trend": trend,
         "trend_description": trend_description,
         "fear": fear,
         "fear_description": fear_description,
         "volatility": volatility,
         "volatility_description": volatility_description,
-        # Numerical values
         "adx": round(adx, 2),
         "vix_percentile": round(vix_percentile, 2),
         "atr_percentile": round(atr_percentile, 2),
-        # Advanced indicators
         "breadth": breadth,
         "breadth_description": breadth_description,
         "strength": strength,
