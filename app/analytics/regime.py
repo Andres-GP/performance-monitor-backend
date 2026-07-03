@@ -1,4 +1,3 @@
-# analytics/regime.py
 import numpy as np
 import pandas as pd
 import yfinance as yf
@@ -9,7 +8,6 @@ import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Mapeo de futuros a tickers de Yahoo Finance (con =F)
 FUTURE_TO_YF = {
     "ES": "ES=F",
     "GC": "GC=F",
@@ -22,7 +20,6 @@ FUTURE_TO_YF = {
     "ZT": "ZT=F",
 }
 
-# Mapeo de futuros a ETFs equivalentes (fallback)
 FUTURE_TO_ETF = {
     "ES": "SPY",
     "GC": "GLD",
@@ -178,24 +175,17 @@ def get_average_daily_volume(symbol: str) -> float:
     Si falla, intenta con el ETF equivalente.
     Si todo falla, devuelve 0.0.
     """
-    # Limpiar símbolo (quitar espacios, etc.)
     symbol = symbol.strip().upper()
     
-    # Lista de tickers a intentar (orden de prioridad)
     tickers_to_try = []
     
-    # 1. Si es un futuro conocido, usar el ticker con =F
     if symbol in FUTURE_TO_YF:
         tickers_to_try.append(FUTURE_TO_YF[symbol])
     else:
         tickers_to_try.append(symbol)
     
-    # 2. Si es un futuro y tiene ETF equivalente, añadirlo como fallback
     if symbol in FUTURE_TO_ETF:
         tickers_to_try.append(FUTURE_TO_ETF[symbol])
-    
-    # 3. Si el símbolo original no es futuro, pero podría ser un ETF directamente,
-    #    ya lo tenemos en la lista.
     
     for ticker in tickers_to_try:
         try:

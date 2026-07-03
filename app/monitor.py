@@ -1,4 +1,3 @@
-# monitor.py
 import asyncio
 import json
 import numpy as np
@@ -380,7 +379,6 @@ class PerformanceMonitor:
                     if market_impact_pct > self.thresholds["portfolio"]["market_impact_max"]:
                         alerts.append(f"Market impact risk for {strategy_id}: position size {position_size} is {market_impact_pct:.2f}% of daily volume (threshold: {self.thresholds['portfolio']['market_impact_max']}%)")
 
-        # --- Guardar en Supabase (con serialización robusta) ---
         try:
             def clean_json(data):
                 if data is None:
