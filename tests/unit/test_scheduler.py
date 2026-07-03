@@ -18,7 +18,7 @@ def test_scheduler_start(mock_monitor):
             mock_loop.return_value = MagicMock()
             scheduler.start()
 
-        assert mock_scheduler_instance.add_job.call_count == 4
+        assert mock_scheduler_instance.add_job.call_count == 5
         mock_scheduler_instance.start.assert_called_once()
 
 def test_scheduler_shutdown(mock_monitor):

@@ -1,4 +1,4 @@
-# scheduler.py
+
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
@@ -48,6 +48,15 @@ class Scheduler:
             name="MT5 Heartbeat Check"
         )
         logger.info("Scheduled MT5 heartbeat check every 60 seconds")
+
+        # --- 5. Portfolio metrics update (every 6 hours) ---
+        self.scheduler.add_job(
+            self.monitor.run_portfolio_check,
+            IntervalTrigger(hours=6),
+            id="portfolio_metrics",
+            name="Portfolio Metrics Update"
+        )
+        logger.info("Scheduled portfolio metrics update every 6 hours")
 
         # --- Start the scheduler ---
         self.scheduler.start()

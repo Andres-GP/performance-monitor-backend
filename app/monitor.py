@@ -156,7 +156,7 @@ class PerformanceMonitor:
     async def run_monthly_check(self):
         logger.info("Running monthly edge health and portfolio check...")
         await self.check_edge_health()
-        await self.check_portfolio_metrics()
+        await self.run_portfolio_check()  # Reutiliza la misma función
         logger.info("Monthly check completed")
 
     async def check_edge_health(self):
@@ -229,19 +229,43 @@ class PerformanceMonitor:
             else:
                 logger.info(f"Strategy {strategy_id}: edge health OK")
 
+    # ======================== PORTFOLIO CHECK (CADA 6 HORAS) ========================
+    async def run_portfolio_check(self):
+        """Run portfolio-level metrics check (called by scheduler every 6 hours)."""
+        logger.info("Running portfolio metrics update...")
+        await self.check_portfolio_metrics()
+        logger.info("Portfolio metrics update completed")
+
     async def check_portfolio_metrics(self):
         """Check portfolio-level metrics with all required components."""
         logger.info("Checking portfolio-level metrics...")
-        strategies = self.supabase.table("strategies").select("strategy_id", "name", "instrument", "instrument_type", "sizing").eq("state", "Running").execute()
-        if len(strategies.data) < 2:
-            logger.info("Less than 2 active strategies, skipping portfolio analysis")
+        strategies = self.supabase.table("strategies").select("*").eq("state", "Running").execute()
+        
+        # Ahora aceptamos al menos 1 estrategia (antes eran 2)
+        if len(strategies.data) < 1:
+            logger.info("No active strategies, skipping portfolio analysis")
             return
+        
+        # Obtener capital real desde accounts (con manejo robusto de errores)
+        initial_capital = 100000  # fallback por defecto
+        capital_result = self.supabase.table("accounts").select("capital").execute()
+        if capital_result.data:
+            try:
+                initial_capital = sum(float(acc.get("capital", 0)) for acc in capital_result.data)
+            except Exception as e:
+                logger.warning(f"Error parsing capital data: {e}, using default 100000")
+                initial_capital = 100000
+            if initial_capital == 0:
+                initial_capital = 100000
+                logger.warning("Capital sum is zero, using default 100000")
+        else:
+            logger.warning("No capital data found, using default 100000")
         
         three_months_ago = (datetime.utcnow() - timedelta(days=90)).isoformat()
         one_month_ago = (datetime.utcnow() - timedelta(days=30)).isoformat()
         all_trades = self.supabase.table("trades").select("*").gte("exit_time", three_months_ago).execute()
         trades_data = all_trades.data
-        if len(trades_data) < 10:
+        if len(trades_data) < 5:  # reducido a 5 trades mínimos
             logger.info("Insufficient portfolio trades for analysis")
             return
         
@@ -251,46 +275,52 @@ class PerformanceMonitor:
         df['pnl'] = df['pnl'].astype(float)
         df['cost'] = df.get('cost', 0).astype(float).fillna(0)
         pivot = df.pivot_table(index='date', columns='strategy_id', values='pnl', aggfunc='sum', fill_value=0)
-        if len(pivot.columns) < 2:
-            logger.info("Not enough data for correlation analysis")
-            return
         
+        # Si hay menos de 2 estrategias, la correlación se omite
         alerts = []
         correlation_matrix = {}
         concentration_metrics = {}
         allocation_deviations = {}
-        initial_capital = 100000  # Configurable; podrías obtenerlo de accounts
+        exposure_data = {}
+        sharpe = 0
+        max_dd = 0
+        current_dd = 0
+        ruin_prob = 0
 
-        # --- 1. Correlation ---
-        corr_matrix = pivot.corr()
-        correlation_matrix = corr_matrix.to_dict()
-        for i in range(len(corr_matrix.columns)):
-            for j in range(i+1, len(corr_matrix.columns)):
-                corr_val = corr_matrix.iloc[i, j]
-                if corr_val > self.thresholds["portfolio"]["max_correlation"]:
-                    strategy_a = corr_matrix.columns[i]
-                    strategy_b = corr_matrix.columns[j]
-                    alerts.append(f"High correlation between {strategy_a} and {strategy_b}: {corr_val:.2f} (threshold: {self.thresholds['portfolio']['max_correlation']})")
-        
+        # --- 1. Correlation (solo si hay más de 1 estrategia) ---
+        if len(pivot.columns) >= 2:
+            corr_matrix = pivot.corr()
+            correlation_matrix = corr_matrix.to_dict()
+            for i in range(len(corr_matrix.columns)):
+                for j in range(i+1, len(corr_matrix.columns)):
+                    corr_val = corr_matrix.iloc[i, j]
+                    if corr_val > self.thresholds["portfolio"]["max_correlation"]:
+                        strategy_a = corr_matrix.columns[i]
+                        strategy_b = corr_matrix.columns[j]
+                        alerts.append(f"High correlation between {strategy_a} and {strategy_b}: {corr_val:.2f} (threshold: {self.thresholds['portfolio']['max_correlation']})")
+        else:
+            correlation_matrix = {"note": "Only one strategy, no correlation calculated"}
+
         # --- 2. Drawdown ---
         portfolio_equity = pivot.sum(axis=1).cumsum()
         if len(portfolio_equity) > 0:
             peak = portfolio_equity.cummax()
-            drawdown = (peak - portfolio_equity) / peak * 100
-            max_dd = drawdown.max()
+            drawdown_series = (peak - portfolio_equity) / peak * 100
+            max_dd = drawdown_series.max()
+            current_dd = drawdown_series.iloc[-1] if len(drawdown_series) > 0 else 0
             if max_dd > self.thresholds["portfolio"]["max_drawdown_global"]:
                 alerts.append(f"Portfolio max drawdown: {max_dd:.1f}% (threshold: {self.thresholds['portfolio']['max_drawdown_global']}%)")
                 if max_dd > self.thresholds["portfolio"]["critical_drawdown_global"]:
                     alerts.append(f"CRITICAL: Portfolio drawdown {max_dd:.1f}% exceeds critical limit ({self.thresholds['portfolio']['critical_drawdown_global']}%)")
-        
+
         # --- 3. Sharpe ---
         daily_returns = pivot.sum(axis=1).values
         if len(daily_returns) > 0:
             sharpe = (np.mean(daily_returns) / (np.std(daily_returns) + 1e-6)) * np.sqrt(252) if np.std(daily_returns) > 0 else 0
             if sharpe < self.thresholds["portfolio"]["sharpe_min"]:
                 alerts.append(f"Portfolio Sharpe ratio: {sharpe:.2f} (threshold: {self.thresholds['portfolio']['sharpe_min']})")
-        
-        # --- 4. Concentration ---
+
+        # --- 4. Exposure by category ---
         strategies_dict = {s["strategy_id"]: s for s in strategies.data}
         category_exposure = {}
         for strategy_id in pivot.columns:
@@ -303,11 +333,12 @@ class PerformanceMonitor:
         if total_exposure > 0:
             for category, exposure in category_exposure.items():
                 percentage = exposure / total_exposure * 100
+                exposure_data[category] = round(percentage, 2)
                 if percentage > self.thresholds["portfolio"]["concentration_max"]:
                     alerts.append(f"Concentration in {category}: {percentage:.1f}% (threshold: {self.thresholds['portfolio']['concentration_max']}%)")
                     concentration_metrics[category] = round(percentage, 2)
-        
-        # --- 5. Ruin probability ---
+
+        # --- 5. Ruin probability (solo si hay suficientes datos) ---
         if len(daily_returns) > 10:
             np.random.seed(42)
             mean_ret = np.mean(daily_returns)
@@ -321,8 +352,8 @@ class PerformanceMonitor:
             ruin_prob = ruin_count / n_simulations * 100
             if ruin_prob > self.thresholds["portfolio"]["ruin_probability_max"] * 100:
                 alerts.append(f"Ruin probability: {ruin_prob:.2f}% (threshold: {self.thresholds['portfolio']['ruin_probability_max']*100}%)")
-        
-        # --- 6. Allocation ---
+
+        # --- 6. Allocation deviations ---
         weights_result = self.supabase.table("portfolio_weights").select("strategy_id", "target_weight").execute()
         if weights_result.data:
             target_weights = {w["strategy_id"]: w["target_weight"] for w in weights_result.data}
@@ -352,8 +383,8 @@ class PerformanceMonitor:
             alerts.append(f"Transaction costs: {monthly_cost_pct_capital:.2f}% of capital (threshold: {self.thresholds['portfolio']['transaction_cost_max']}%)")
         if monthly_cost_pct_gross > self.thresholds["portfolio"]["transaction_cost_gross_max"]:
             alerts.append(f"Transaction costs: {monthly_cost_pct_gross:.2f}% of gross profit (threshold: {self.thresholds['portfolio']['transaction_cost_gross_max']}%)")
-        
-        # --- 8. Market impact ---
+
+        # --- 8. Market impact (opcional, mantenemos igual) ---
         for strategy in strategies.data:
             strategy_id = strategy["strategy_id"]
             sizing = strategy.get("sizing", 1)
@@ -367,22 +398,24 @@ class PerformanceMonitor:
                     if market_impact_pct > self.thresholds["portfolio"]["market_impact_max"]:
                         alerts.append(f"Market impact risk for {strategy_id}: position size {position_size} is {market_impact_pct:.2f}% of daily volume (threshold: {self.thresholds['portfolio']['market_impact_max']}%)")
 
-        # Save portfolio metrics
+        # --- 9. Guardar en Supabase ---
         try:
             self.supabase.table("portfolio_metrics").insert({
                 "date": datetime.utcnow().date().isoformat(),
-                "sharpe_ratio": round(sharpe, 2) if 'sharpe' in locals() else None,
-                "max_drawdown": round(max_dd, 2) if 'max_dd' in locals() else None,
-                "ruin_probability": round(ruin_prob, 2) if 'ruin_prob' in locals() else None,
-                "transaction_cost_pct": round(monthly_cost_pct_capital, 2),
+                "sharpe": round(sharpe, 2) if sharpe else None,
+                "max_drawdown": round(max_dd, 2) if max_dd else None,
+                "current_drawdown": round(current_dd, 2) if current_dd else None,
+                "exposure_by_category": json.dumps(exposure_data) if exposure_data else None,
                 "correlation_matrix": json.dumps(correlation_matrix) if correlation_matrix else None,
+                "ruin_probability": round(ruin_prob, 2) if ruin_prob else None,
+                "transaction_cost_pct": round(monthly_cost_pct_capital, 2),
                 "concentration_metrics": json.dumps(concentration_metrics) if concentration_metrics else None,
                 "allocation_deviations": json.dumps(allocation_deviations) if allocation_deviations else None,
             }).execute()
         except Exception as e:
             logger.error(f"Failed to store portfolio metrics: {e}")
 
-        # Send alerts
+        # --- 10. Enviar alertas si hay ---
         if alerts:
             subject = "[Performance Monitor] Portfolio Alerts"
             body = "Portfolio-level alerts:\n\n" + "\n".join(alerts) + f"\n\nTimestamp: {datetime.utcnow().isoformat()}"
