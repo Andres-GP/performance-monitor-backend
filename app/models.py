@@ -17,17 +17,16 @@ class StrategyInfo(BaseModel):
     health_status: Optional[str] = "healthy"
 
 class TradeRecord(BaseModel):
-    trade_id: Optional[str] = None  # ✅ Opcional (NinjaTrader puede enviarlo)
     strategy_id: str
     instrument: str
     entry_time: datetime
     exit_time: Optional[datetime]
-    quantity: int
+    quantity: float 
     entry_price: float
     exit_price: Optional[float]
-    pnl: Optional[float]
-    direction: str  # "Long" or "Short"
-    cost: Optional[float] = None
+    pnl: float
+    direction: str
+    cost: Optional[float] = 0.0
 
 class PerformanceSnapshot(BaseModel):
     strategy_id: str
