@@ -1,4 +1,3 @@
-// PerformanceReporter.cs
 using System;
 using System.Collections.Generic;
 using System.Net.Http;
@@ -29,6 +28,13 @@ namespace NinjaTrader.NinjaScript.Strategies
         private static readonly HttpClient _httpClient = new HttpClient();
         private bool _startReported = false;
         private Dictionary<string, bool> _rolloverAlertSent = new Dictionary<string, bool>();
+
+        // --- Manual trade tracking (bypass AllTrades) ---
+        private double _lastEntryPrice = 0;
+        private DateTime _lastEntryTime = DateTime.MinValue;
+        private int _lastEntryQuantity = 0;
+        private MarketPosition _lastEntryPosition = MarketPosition.Flat;
+        private bool _hasEntryData = false;
 
         protected override void OnStateChange()
         {
@@ -173,31 +179,123 @@ namespace NinjaTrader.NinjaScript.Strategies
             await SendToApi("/strategies/stop", data);
         }
 
+        // 🔥 OnPositionUpdate: store entry data and report trade on close ONLY if exit price > 0
         protected override void OnPositionUpdate(Position position, double averagePrice, int quantity, MarketPosition marketPosition)
         {
-            if (quantity == 0 && SystemPerformance.AllTrades.Count > 0)
+            Print($"📌 OnPositionUpdate: quantity={quantity}, marketPosition={marketPosition}");
+
+            // Position opened: store entry data
+            if (quantity > 0 && !_hasEntryData)
             {
-                Trade lastTrade = SystemPerformance.AllTrades[SystemPerformance.AllTrades.Count - 1];
-                ReportTradeClosed(lastTrade);
+                _lastEntryPrice = averagePrice;
+                _lastEntryTime = Time[0];
+                _lastEntryQuantity = quantity;
+                _lastEntryPosition = marketPosition;
+                _hasEntryData = true;
+                Print($"📌 Stored entry: price={_lastEntryPrice}, time={_lastEntryTime}, qty={_lastEntryQuantity}, pos={_lastEntryPosition}");
             }
+
+            // Position closed: report trade ONLY if exit price is valid (> 0)
+            if (quantity == 0 && _hasEntryData && averagePrice > 0)
+            {
+                double exitPrice = averagePrice;
+                DateTime exitTime = Time[0];
+                string direction = (_lastEntryPosition == MarketPosition.Long) ? "Long" : "Short";
+                double pnl = (direction == "Long") ? (exitPrice - _lastEntryPrice) * _lastEntryQuantity
+                                                   : (_lastEntryPrice - exitPrice) * _lastEntryQuantity;
+
+                Print($"📌 Trade closed: entry={_lastEntryPrice}, exit={exitPrice}, qty={_lastEntryQuantity}, direction={direction}, PnL={pnl}");
+
+                ReportTradeClosedManual(
+                    _lastEntryPrice,
+                    _lastEntryTime,
+                    exitPrice,
+                    exitTime,
+                    _lastEntryQuantity,
+                    pnl,
+                    direction,
+                    0.0
+                );
+
+                // Clear entry data to avoid duplicate reporting
+                _hasEntryData = false;
+                _lastEntryPrice = 0;
+                _lastEntryTime = DateTime.MinValue;
+                _lastEntryQuantity = 0;
+                _lastEntryPosition = MarketPosition.Flat;
+            }
+
+            base.OnPositionUpdate(position, averagePrice, quantity, marketPosition);
         }
 
-        private async void ReportTradeClosed(Trade trade)
+        // Fallback: OnExecutionUpdate can also trigger reporting (if OnPositionUpdate missed it or exit price was 0)
+        protected override void OnExecutionUpdate(Execution execution, string executionId, double price, int quantity, MarketPosition marketPosition, string orderId, DateTime time)
+        {
+            // If we have entry data and we detect a filled exit order, report again if not already reported.
+            if (execution.Order != null && execution.Order.OrderState == OrderState.Filled && _hasEntryData)
+            {
+                string orderName = execution.Order.Name ?? "";
+                bool isExitOrder = orderName.Contains("Exit") || orderName.Contains("Stop") || orderName.Contains("Target") ||
+                                   orderName.Contains("Stop loss") || orderName.Contains("Profit target");
+
+                if (isExitOrder && price > 0)  // Ensure exit price is valid
+                {
+                    // This could be a duplicate, but we check _hasEntryData to prevent double report.
+                    // If OnPositionUpdate already reported, we cleared _hasEntryData, so this won't run.
+                    double exitPrice = price;
+                    DateTime exitTime = time;
+                    string direction = (_lastEntryPosition == MarketPosition.Long) ? "Long" : "Short";
+                    double pnl = (direction == "Long") ? (exitPrice - _lastEntryPrice) * _lastEntryQuantity
+                                                       : (_lastEntryPrice - exitPrice) * _lastEntryQuantity;
+
+                    Print($"📌 Fallback trade closed via Execution: entry={_lastEntryPrice}, exit={exitPrice}, qty={_lastEntryQuantity}, direction={direction}, PnL={pnl}");
+
+                    ReportTradeClosedManual(
+                        _lastEntryPrice,
+                        _lastEntryTime,
+                        exitPrice,
+                        exitTime,
+                        _lastEntryQuantity,
+                        pnl,
+                        direction,
+                        0.0
+                    );
+
+                    // Clear entry data
+                    _hasEntryData = false;
+                    _lastEntryPrice = 0;
+                    _lastEntryTime = DateTime.MinValue;
+                    _lastEntryQuantity = 0;
+                    _lastEntryPosition = MarketPosition.Flat;
+                }
+            }
+
+            base.OnExecutionUpdate(execution, executionId, price, quantity, marketPosition, orderId, time);
+        }
+
+        // Manual trade reporting method (does not rely on AllTrades)
+        private async void ReportTradeClosedManual(double entryPrice, DateTime entryTime, double exitPrice, DateTime exitTime, int quantity, double pnl, string direction, double commission)
         {
             var data = new
             {
                 strategy_id = this.Id.ToString(),
                 instrument = this.Instrument.FullName,
-                entry_time = trade.Entry.Time.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.fffZ"),
-                exit_time = trade.Exit?.Time.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.fffZ"),
-                quantity = trade.Quantity,
-                entry_price = trade.Entry.Price,
-                exit_price = trade.Exit?.Price ?? 0,
-                pnl = trade.ProfitCurrency,
-                direction = trade.Entry.Position.ToString(),
-                cost = trade.Commission
+                entry_time = entryTime.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.fffZ"),
+                exit_time = exitTime.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.fffZ"),
+                quantity = quantity,
+                entry_price = entryPrice,
+                exit_price = exitPrice,
+                pnl = pnl,
+                direction = direction,
+                cost = commission
             };
             await SendToApi("/trades", data);
+        }
+
+        // Original method kept for compatibility (not used)
+        private async void ReportTradeClosed(Trade trade)
+        {
+            // Not used, but kept to avoid breaking any references.
         }
 
         private async Task SendToApi(string endpoint, object data)
