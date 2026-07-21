@@ -1,16 +1,18 @@
 //+------------------------------------------------------------------+
 //|                                              StrategyTemplateMT5.mq5 |
 //|                   Full template with performance monitoring       |
+//|                   FIXES: direction, quantity, ISO dates, heartbeat|
+//|                   IMPROVED: fixed strategy_id input              |
 //+------------------------------------------------------------------+
 #property copyright "AlphaCapital"
 #property link      "https://www.alphacapital.com"
-#property version   "1.00"
+#property version   "1.10"
 
 //+------------------------------------------------------------------+
 //| INCLUDES                                                         |
 //+------------------------------------------------------------------+
-#include <Trade/Trade.mqh>              // Para CTrade
-#include <PerformanceReporter.mqh>     // Para reportar al backend
+#include <Trade/Trade.mqh>              // For CTrade
+#include <PerformanceReporter.mqh>     // For backend reporting
 
 //+------------------------------------------------------------------+
 //| INPUT PARAMETERS (Editable from UI)                              |
@@ -18,11 +20,12 @@
 //--- Backend configuration
 input string   Inp_BackendUrl   = "https://laxative-buckskin-gyration.ngrok-free.dev";   // Backend URL
 input string   Inp_AuthToken    = ""; // Auth Token
+input string   Inp_StrategyId   = ""; // Custom strategy ID (if empty, auto-generated)
 
 //--- Monitoring settings
 input bool     Inp_EnableInactivity = true;      // Enable inactivity alert
 input int      Inp_MaxBarsWithoutTrade = 50;     // Bars without trade before alert
-input int      Inp_RolloverAlertDays = 60;       // 🔥 NEW: Days before expiry to send alert (0 = disabled)
+input int      Inp_RolloverAlertDays = 60;       // Days before expiry to send alert (0 = disabled)
 
 //--- Trading parameters
 input double   Inp_LotSize      = 0.1;           // Lot size
@@ -38,38 +41,45 @@ input int      Inp_TakeProfit   = 100;           // Take Profit in points
 //+------------------------------------------------------------------+
 //| GLOBAL VARIABLES                                                 |
 //+------------------------------------------------------------------+
-PerformanceReporter *g_reporter = NULL;   // Reporter para backend
-CTrade            g_trade;               // Objeto CTrade para operar
+PerformanceReporter *g_reporter = NULL;   // Reporter for backend
+CTrade            g_trade;               // CTrade object for trading
 
-//--- Indicadores (ejemplo: medias móviles)
+//--- Indicators (example: moving averages)
 int               g_handleFastMA = INVALID_HANDLE;
 int               g_handleSlowMA = INVALID_HANDLE;
 
-//--- Variables de tracking
+//--- Tracking variables
 ulong             g_lastTicket = 0;
 double            g_lastEntryPrice = 0;
 datetime          g_lastEntryTime = 0;
 double            g_lastVolume = 0;
 int               g_barsCount = 0;
 bool              g_hasPosition = false;
-bool              g_waitingForClose = false;   // Para evitar múltiples cierres
+bool              g_waitingForClose = false;   // Prevent multiple close attempts
 
 //+------------------------------------------------------------------+
 //| INITIALIZATION                                                   |
 //+------------------------------------------------------------------+
 int OnInit()
 {
-   //--- Configurar el objeto CTrade
+   //--- Configure CTrade
    g_trade.SetExpertMagicNumber(Inp_MagicNumber);
    g_trade.SetDeviationInPoints(10);
    
    //--- 1. INITIALIZE REPORTER
    string accountType = (AccountInfoInteger(ACCOUNT_TRADE_MODE) == ACCOUNT_TRADE_MODE_DEMO) ? "Simulation" : "Real";
    
+   // Build strategy ID: use custom if provided, else auto-generate
+   string strategyId;
+   if(StringLen(Inp_StrategyId) > 0)
+      strategyId = Inp_StrategyId;
+   else
+      strategyId = IntegerToString(TimeCurrent()) + "_StrategyTemplate";   // Auto-generate
+   
    g_reporter = new PerformanceReporter(
       Inp_BackendUrl,
       Inp_AuthToken,
-      "StrategyTemplate",              // Cambia por el nombre de tu EA
+      strategyId,                     // ✅ FIXED ID (or auto-generated)
       Symbol(),
       EnumToString(Period()),
       (int)(Inp_LotSize * 100),
@@ -82,18 +92,18 @@ int OnInit()
       return INIT_FAILED;
    }
    
-   //--- Configurar monitoreo
+   //--- Configure monitoring
    g_reporter.SetMaxBarsWithoutTrade(Inp_MaxBarsWithoutTrade);
    g_reporter.EnableInactivityAlert(Inp_EnableInactivity);
-   g_reporter.SetRolloverAlertDays(Inp_RolloverAlertDays);   // 🔥 CONFIGURAR DÍAS
+   g_reporter.SetRolloverAlertDays(Inp_RolloverAlertDays);
    
-   //--- Reportar inicio y capital
+   //--- Report strategy start and capital
    g_reporter.ReportStrategyStarted();
    double capital = AccountInfoDouble(ACCOUNT_BALANCE);
    g_reporter.ReportCapital(capital, AccountInfoString(ACCOUNT_CURRENCY));
-   Print("[INFO] EA started successfully.");
+   Print("[INFO] EA started successfully. Strategy ID: ", strategyId);
    
-   //--- 2. INITIALIZE INDICATORS (EJEMPLO: MEDIAS MÓVILES)
+   //--- 2. INITIALIZE INDICATORS (example: moving averages)
    g_handleFastMA = iMA(_Symbol, _Period, Inp_FastMA, 0, MODE_SMA, PRICE_CLOSE);
    g_handleSlowMA = iMA(_Symbol, _Period, Inp_SlowMA, 0, MODE_SMA, PRICE_CLOSE);
    
@@ -104,7 +114,7 @@ int OnInit()
    }
    Print("[INFO] Indicators initialized.");
    
-   //--- 3. START TIMER (si se usa)
+   //--- 3. START TIMER (if used)
    if(Inp_UseTimer)
       EventSetTimer(30);
    
@@ -134,10 +144,10 @@ void OnTick()
 {
    if(CheckPointer(g_reporter) == POINTER_INVALID) return;
    
-   // 🔥 VERIFICAR ROLLOVER EN CADA TICK
+   // Check rollover on every tick
    g_reporter.CheckRollover();
    
-   //--- Monitoreo de inactividad
+   // Inactivity monitoring
    int currentBars = Bars(_Symbol, _Period);
    if(currentBars != g_barsCount && currentBars > 0)
    {
@@ -145,16 +155,16 @@ void OnTick()
       g_reporter.OnBarUpdate(g_barsCount);
    }
    
-   //--- Detectar cierre de posición (para reportar al backend)
+   // Detect position close (to report to backend)
    static int prevPosTotal = 0;
    int currentPosTotal = PositionsTotal();
    
-   // Si había posición y ahora no hay, se cerró
+   // If there was a position and now there is none, it was closed
    if(prevPosTotal > 0 && currentPosTotal == 0)
    {
       if(g_lastTicket > 0)
       {
-         // Obtener datos del historial
+         // Get data from history
          HistorySelect(0, TimeCurrent());
          int total = HistoryDealsTotal();
          if(total > 0)
@@ -169,16 +179,28 @@ void OnTick()
                datetime entryTime = (datetime)HistoryDealGetInteger(ticket, DEAL_TIME);
                double commission = HistoryDealGetDouble(ticket, DEAL_COMMISSION);
                
+               // Get position type from history
+               ENUM_DEAL_TYPE dealType = (ENUM_DEAL_TYPE)HistoryDealGetInteger(ticket, DEAL_TYPE);
+               ENUM_POSITION_TYPE posType;
+               if(dealType == DEAL_TYPE_BUY)
+                  posType = POSITION_TYPE_BUY;
+               else if(dealType == DEAL_TYPE_SELL)
+                  posType = POSITION_TYPE_SELL;
+               else
+                  posType = POSITION_TYPE_BUY; // fallback
+               
+               // Report trade with 10 parameters (including posType)
                g_reporter.ReportTradeClosed(
                   ticket,
                   symbol,
-                  g_lastEntryPrice,
-                  entryPrice,
-                  volume,
+                  g_lastEntryPrice,   // saved entry price
+                  entryPrice,         // exit price
+                  volume,             // actual volume (double)
                   profit,
-                  g_lastEntryTime,
+                  g_lastEntryTime,    // saved entry time
                   TimeCurrent(),
-                  commission
+                  commission,
+                  posType
                );
                Print("[INFO] Trade closed reported: ", ticket, " profit: ", profit);
             }
@@ -190,7 +212,7 @@ void OnTick()
    }
    prevPosTotal = currentPosTotal;
    
-   //--- Actualizar estado de posición
+   // Update position status
    if(PositionsTotal() > 0)
    {
       for(int i = 0; i < PositionsTotal(); i++)
@@ -219,7 +241,7 @@ void OnTick()
       g_hasPosition = false;
    }
    
-   //--- Lógica de trading (si NO se usa timer)
+   //--- Trading logic (if NOT using timer)
    if(!Inp_UseTimer)
       ExecuteTradingLogic();
 }
@@ -230,9 +252,8 @@ void OnTick()
 void OnTrade()
 {
    if(CheckPointer(g_reporter) == POINTER_INVALID) return;
-   
-   // Detectar apertura de nueva posición (ya se maneja en OnTick)
-   // Mantenemos por si se necesita lógica adicional
+   // New position opening is already handled in OnTick
+   // Keep for additional logic if needed
 }
 
 //+------------------------------------------------------------------+
@@ -242,7 +263,7 @@ void OnTimer()
 {
    if(CheckPointer(g_reporter) == POINTER_INVALID) return;
    
-   // 🔥 VERIFICAR ROLLOVER EN EL TIMER (por si acaso)
+   // Check rollover in timer as well
    g_reporter.CheckRollover();
    
    if(Inp_UseTimer)
@@ -250,14 +271,14 @@ void OnTimer()
 }
 
 //+------------------------------------------------------------------+
-//| MAIN TRADING LOGIC (PON AQUÍ TU ESTRATEGIA)                      |
+//| MAIN TRADING LOGIC (PUT YOUR STRATEGY HERE)                      |
 //+------------------------------------------------------------------+
 void ExecuteTradingLogic()
 {
-   //--- Verificar que hay suficientes barras
+   //--- Check for enough bars
    if(Bars(_Symbol, _Period) < Inp_SlowMA) return;
    
-   //--- Obtener valores de indicadores (ejemplo: medias móviles)
+   //--- Get indicator values (example: moving averages)
    double fastMA[], slowMA[];
    ArraySetAsSeries(fastMA, true);
    ArraySetAsSeries(slowMA, true);
@@ -269,10 +290,10 @@ void ExecuteTradingLogic()
    bool sellCondition = (fastMA[1] < slowMA[1] && fastMA[2] >= slowMA[2]);
    
    //--- ============================================================
-   //--- PON AQUÍ TU LÓGICA DE TRADING (reemplaza el ejemplo)
+   //--- PUT YOUR TRADING LOGIC HERE (replace the example)
    //--- ============================================================
    
-   // Si hay posición, cerrarla si la condición cambia
+   // If position exists, close it if condition changes
    if(g_hasPosition && !g_waitingForClose)
    {
       bool shouldClose = false;
@@ -300,7 +321,7 @@ void ExecuteTradingLogic()
       }
    }
    
-   // Abrir nueva posición si no hay posición
+   // Open new position if no position
    if(!g_hasPosition && !g_waitingForClose)
    {
       if(buyCondition)
@@ -349,7 +370,7 @@ void ExecuteTradingLogic()
 }
 
 //+------------------------------------------------------------------+
-//| HELPER: Reportar alerta de salud manualmente                    |
+//| HELPER: Report a manual health alert                             |
 //+------------------------------------------------------------------+
 void ReportHealthAlert(string problemType, string details, string severity = "high")
 {
