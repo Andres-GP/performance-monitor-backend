@@ -287,65 +287,87 @@ def create_app() -> FastAPI:
         }).eq("strategy_id", data["strategy_id"]).execute()
         return {"status": "ok"}
 
-    # ---- Trades ----
     @app.post("/trades", 
-              dependencies=[Depends(verify_token)],
-              openapi_extra={
-                  "requestBody": {
-                      "content": {
-                          "application/json": {
-                              "examples": {
-                                  "example": {
-                                      "summary": "Closed trade from MT5",
-                                      "value": {
-                                          "strategy_id": "1782168806_TestStrategyMT5",
-                                          "instrument": "US100Cash",
-                                          "entry_time": "2026-06-22T22:55:29Z",
-                                          "exit_time": "2026-06-22T22:55:59Z",
-                                          "quantity": 0,
-                                          "entry_price": 30333.7,
-                                          "exit_price": 30316.86,
-                                          "pnl": 0.0,
-                                          "direction": "Long",
-                                          "cost": 0.0
-                                      }
-                                  }
-                              }
-                          }
-                      }
-                  }
-              })
-    async def trade_closed(data: dict):
-        logger.info(f"Trade received: {data}")
+        dependencies=[Depends(verify_token)],
+        openapi_extra={
+            "requestBody": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "example": {
+                                "summary": "Closed trade from MT5",
+                                "value": {
+                                    "strategy_id": "1782168806_TestStrategyMT5",
+                                    "instrument": "US100Cash",
+                                    "entry_time": "2026-06-22T22:55:29Z",
+                                    "exit_time": "2026-06-22T22:55:59Z",
+                                    "quantity": 0,
+                                    "entry_price": 30333.7,
+                                    "exit_price": 30316.86,
+                                    "pnl": 0.0,
+                                    "direction": "Long",
+                                    "cost": 0.0
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        })
+    async def trade_closed(request: Request):
+        # --- LOG 1: Cuerpo crudo recibido ---
+        raw_body = await request.body()
+        body_str = raw_body.decode('utf-8').strip()
+        logger.info(f"🔍 RAW BODY RECEIVED: {body_str}")
+        logger.info(f"🔍 RAW BODY LENGTH: {len(body_str)} chars")
+        
+        try:
+            # --- LOG 2: Limpieza y parseo ---
+            body_str = body_str.rstrip('\x00')
+            # Si hay múltiples objetos JSON, tomar solo el primero
+            if body_str.count('{') > 1:
+                depth = 0
+                end_idx = 0
+                for i, ch in enumerate(body_str):
+                    if ch == '{':
+                        depth += 1
+                    elif ch == '}':
+                        depth -= 1
+                        if depth == 0:
+                            end_idx = i + 1
+                            break
+                if end_idx > 0:
+                    body_str = body_str[:end_idx]
+                    logger.info(f"🔍 CLEANED BODY: {body_str}")
+            data = json.loads(body_str)
+            logger.info(f"🔍 PARSED DATA: {data}")
+        except json.JSONDecodeError as e:
+            logger.error(f"❌ Invalid JSON received: {e}")
+            logger.error(f"❌ Problematic string: {body_str[:200]}...")
+            raise HTTPException(status_code=400, detail="Invalid JSON body")
+        
+        logger.info(f"✅ Trade received: {data}")
         
         strategy_id = data["strategy_id"]
         instrument = data["instrument"]
         platform = "MT5"
         
+        # --- 1. Buscar o crear la estrategia (lógica existente) ---
         strategy = supabase.table("strategies").select("strategy_id").eq("strategy_id", strategy_id).execute()
         
         if not strategy.data:
             logger.warning(f"Strategy {strategy_id} not found. Looking for strategy on instrument '{instrument}' with platform '{platform}'...")
-            
-            existing = supabase.table("strategies").select("strategy_id, name")\
-                .eq("instrument", instrument)\
-                .eq("platform", platform)\
-                .eq("state", "Running").execute()
-            
+            existing = supabase.table("strategies").select("strategy_id, name").eq("instrument", instrument).eq("platform", platform).eq("state", "Running").execute()
             if existing.data:
                 strategy_id = existing.data[0]["strategy_id"]
                 strategy_name = existing.data[0]["name"]
                 logger.info(f"Found existing strategy for {instrument}: {strategy_name} (ID: {strategy_id}). Using this ID.")
             else:
-                existing = supabase.table("strategies").select("strategy_id, name")\
-                    .eq("instrument", instrument)\
-                    .eq("platform", platform).execute()
-                
+                existing = supabase.table("strategies").select("strategy_id, name").eq("instrument", instrument).eq("platform", platform).execute()
                 if existing.data:
                     strategy_id = existing.data[0]["strategy_id"]
                     strategy_name = existing.data[0]["name"]
-                    logger.info(f"Found Stopped strategy for {instrument}: {strategy_name} (ID: {strategy_id}). Reactivating and using this ID.")
-                    
+                    logger.info(f"Found Stopped strategy for {instrument}: {strategy_name} (ID: {strategy_id}). Reactivating...")
                     supabase.table("strategies").update({
                         "state": "Running",
                         "updated_at": datetime.utcnow().isoformat(),
@@ -371,61 +393,105 @@ def create_app() -> FastAPI:
                         logger.error(f"Failed to create strategy on the fly: {e}")
                         raise HTTPException(status_code=500, detail="Failed to create strategy")
         
+        # --- 2. Extraer datos del payload ---
+        entry_price = data.get("entry_price")
+        exit_price = data.get("exit_price")
+        quantity = data.get("quantity", 1.0)
+        
+        # 🔥 DIRECCIÓN: se toma del payload enviado por MetaTrader
+        direction_raw = data.get("direction", "")
+        direction = direction_raw.lower()
+        logger.info(f"➡️ DIRECTION RAW from payload: '{direction_raw}'")
+        logger.info(f"➡️ DIRECTION normalized: '{direction}'")
+        
+        # Fallback de quantity
+        if quantity == 0:
+            quantity = 1.0
+            logger.warning(f"⚠️ Quantity was 0, using fallback 1 for strategy {strategy_id}")
+        
+        # --- 3. Calcular PnL (si no viene o es 0) ---
+        pnl = data.get("pnl", 0.0)
+        if pnl == 0 and entry_price and exit_price:
+            # Si no hay dirección válida, deducir de los precios (fallback)
+            if direction not in ["long", "short"]:
+                if exit_price > entry_price:
+                    direction = "long"
+                    logger.info(f"Deduced direction: Long (exit {exit_price} > entry {entry_price})")
+                else:
+                    direction = "short"
+                    logger.info(f"Deduced direction: Short (exit {exit_price} < entry {entry_price})")
+            
+            # Calcular PnL según dirección
+            if direction == "long":
+                pnl = (exit_price - entry_price) * quantity
+            else:  # short
+                pnl = (entry_price - exit_price) * quantity
+            
+            logger.info(f"💰 Calculated PnL: {pnl} (direction={direction}, qty={quantity})")
+        else:
+            # Si ya viene PnL, normalizar dirección
+            direction = "long" if direction == "long" else "short"
+        
+        # --- 4. Parsear fechas ---
         try:
             entry_time = parse_datetime(data["entry_time"])
             exit_time = parse_datetime(data["exit_time"]) if data.get("exit_time") else None
         except Exception as e:
-            logger.warning(f"Date parse error: {e}, using UTC now")
+            logger.warning(f"📅 Date parse error: {e}, using UTC now")
             entry_time = exit_time = datetime.utcnow()
-            
+        
+        # --- 5. Guardar el trade en la base de datos ---
         trade = TradeRecord(
             strategy_id=strategy_id,
             instrument=instrument,
             entry_time=entry_time,
             exit_time=exit_time,
-            quantity=data.get("quantity", 0),
-            entry_price=data.get("entry_price", 0.0),
-            exit_price=data.get("exit_price"),
-            pnl=data.get("pnl", 0.0),
-            direction=data.get("direction", "Long"),
+            quantity=quantity,
+            entry_price=entry_price,
+            exit_price=exit_price,
+            pnl=pnl,
+            direction=direction.capitalize(),
             cost=data.get("cost", 0.0)
         )
         trade_dict = trade.dict()
         trade_dict["entry_time"] = trade_dict["entry_time"].isoformat()
         if trade_dict["exit_time"]:
             trade_dict["exit_time"] = trade_dict["exit_time"].isoformat()
-
+        
+        # Eliminar campos que no se guardan
         fields_to_remove = ["trade_id"]  
         for field in fields_to_remove:
             if field in trade_dict:
                 del trade_dict[field]
         
         supabase.table("trades").insert(trade_dict).execute()
+        logger.info(f"✅ Trade saved: {strategy_id} | {instrument} | {direction} | PnL: {pnl}")
         return {"status": "ok"}
+
 
     # ---- Health alerts ----
     @app.post("/alerts", 
-              dependencies=[Depends(verify_token)],
-              openapi_extra={
-                  "requestBody": {
-                      "content": {
-                          "application/json": {
-                              "examples": {
-                                  "example": {
-                                      "summary": "Frozen order alert",
-                                      "value": {
-                                          "strategy_id": "1782168806_TestStrategyMT5",
-                                          "timestamp": "2026-06-22T22:55:00Z",
-                                          "problem_type": "Frozen order",
-                                          "details": "Order LongEntry has been Submitted for 6.6 seconds. Cancelling.",
-                                          "severity": "high"
-                                      }
-                                  }
-                              }
-                          }
-                      }
-                  }
-              })
+            dependencies=[Depends(verify_token)],
+            openapi_extra={
+                "requestBody": {
+                    "content": {
+                        "application/json": {
+                            "examples": {
+                                "example": {
+                                    "summary": "Frozen order alert",
+                                    "value": {
+                                        "strategy_id": "1782168806_TestStrategyMT5",
+                                        "timestamp": "2026-06-22T22:55:00Z",
+                                        "problem_type": "Frozen order",
+                                        "details": "Order LongEntry has been Submitted for 6.6 seconds. Cancelling.",
+                                        "severity": "high"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            })
     async def receive_alert(alert: dict):
         logger.warning(f"Health alert: {alert['problem_type']} - {alert['details']}")
         timestamp_str = alert.get("timestamp")
@@ -463,7 +529,7 @@ def create_app() -> FastAPI:
 
         return {"status": "alert received"}
 
-    # ---- Heartbeat ----
+    # ---- Heartbeat (CORREGIDO: lectura manual de JSON) ----
     @app.post("/heartbeat", 
               dependencies=[Depends(verify_token)],
               openapi_extra={
@@ -482,8 +548,30 @@ def create_app() -> FastAPI:
                       }
                   }
               })
-    async def receive_heartbeat(data: dict):
-        """Receives heartbeat from a strategy (MetaTrader)."""
+    async def receive_heartbeat(request: Request):
+        try:
+            raw_body = await request.body()
+            body_str = raw_body.decode('utf-8').strip()
+            body_str = body_str.rstrip('\x00')
+            # Si hay múltiples objetos, tomar solo el primero
+            if body_str.count('{') > 1:
+                depth = 0
+                end_idx = 0
+                for i, ch in enumerate(body_str):
+                    if ch == '{':
+                        depth += 1
+                    elif ch == '}':
+                        depth -= 1
+                        if depth == 0:
+                            end_idx = i + 1
+                            break
+                if end_idx > 0:
+                    body_str = body_str[:end_idx]
+            data = json.loads(body_str)
+        except json.JSONDecodeError as e:
+            logger.error(f"Invalid JSON received: {e}")
+            raise HTTPException(status_code=400, detail="Invalid JSON body")
+        
         strategy_id = data.get("strategy_id")
         if not strategy_id:
             raise HTTPException(status_code=400, detail="strategy_id required")

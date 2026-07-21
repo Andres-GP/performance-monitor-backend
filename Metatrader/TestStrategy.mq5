@@ -1,22 +1,23 @@
 //+------------------------------------------------------------------+
 //|                                                TestStrategy.mq5  |
 //|                   Test strategy with heartbeat + rollover        |
+//|                   UPDATED: Uses corrected PerformanceReporter    |
 //+------------------------------------------------------------------+
 #property copyright "AlphaCapital"
 #property version   "1.00"
 #property strict
 
 #include <Trade/Trade.mqh>
-#include <PerformanceReporter.mqh>
+#include <PerformanceReporter.mqh>   // ✅ Use the corrected version above
 
 //--- Input parameters
 input string   Inp_BackendUrl      = "https://laxative-buckskin-gyration.ngrok-free.dev";
 input string   Inp_AuthToken       = "6d84e658780b073a7a66643135247494094bb63d0474b558c55fe002ce296920";
-input double   Inp_LotSize         = 0.1;
+input double   Inp_LotSize         = 0.1;            // Position size in lots (0.1 = 1 mini lot)
 input int      Inp_TimerSeconds    = 30;
 input int      Inp_MagicNumber     = 1000;
 input bool     Inp_EnableInactivity = true;
-input int      Inp_RolloverAlertDays = 60;   // ✅ NUEVO: días antes de expiración
+input int      Inp_RolloverAlertDays = 60;   // Days before expiry
 
 //--- Global variables
 PerformanceReporter *g_reporter = NULL;
@@ -43,7 +44,7 @@ int OnInit()
       "TestStrategyMT5",
       Symbol(),
       EnumToString(Period()),
-      (int)(Inp_LotSize * 100),
+      (int)(Inp_LotSize * 100),   // Sizing in contracts (e.g., 10 contracts for 0.1 lot)
       accountType
    );
    
@@ -51,8 +52,11 @@ int OnInit()
    {
       g_reporter.SetMaxBarsWithoutTrade(50);
       g_reporter.EnableInactivityAlert(Inp_EnableInactivity);
-      g_reporter.SetRolloverAlertDays(Inp_RolloverAlertDays);   // ✅ Configurar días
+      g_reporter.SetRolloverAlertDays(Inp_RolloverAlertDays);
       g_reporter.ReportStrategyStarted();
+      
+      // Force rollover check immediately
+      g_reporter.CheckRollover();
       
       double capital = AccountInfoDouble(ACCOUNT_BALANCE);
       g_reporter.ReportCapital(capital, AccountInfoString(ACCOUNT_CURRENCY));
@@ -86,7 +90,6 @@ void OnTick()
 {
    if(CheckPointer(g_reporter) == POINTER_INVALID) return;
    
-   // ✅ Verificar rollover en cada tick
    g_reporter.CheckRollover();
    
    int currentBars = Bars(_Symbol, _Period);
@@ -142,17 +145,16 @@ void OnTimer()
 {
    if(CheckPointer(g_reporter) == POINTER_INVALID) return;
    
-   //--- ✅ Heartbeat cada 30 segundos ---
+   // Heartbeat every 30 seconds (now only sent if strategy started)
    g_reporter.SendHeartbeat();
    
-   // ✅ Verificar rollover también en el timer (por si acaso)
    g_reporter.CheckRollover();
    
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    if(ask <= 0 || bid <= 0) return;
    
-   //--- Cerrar posición si existe ---
+   // Close existing position
    if(g_hasPosition && g_lastTicket > 0)
    {
       if(PositionSelectByTicket(g_lastTicket))
@@ -165,16 +167,19 @@ void OnTimer()
             if(closePrice == 0)
                closePrice = (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY) ? bid : ask;
             
+            ENUM_POSITION_TYPE posType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+            
             g_reporter.ReportTradeClosed(
                g_lastTicket,
                PositionGetString(POSITION_SYMBOL),
                g_entryPrice,
                closePrice,
-               PositionGetDouble(POSITION_VOLUME),
+               PositionGetDouble(POSITION_VOLUME),   // ✅ Actual volume (e.g., 0.1)
                0.0,
                g_entryTime,
                TimeCurrent(),
-               0.0
+               0.0,
+               posType
             );
             g_hasPosition = false;
             g_lastTicket = 0;
@@ -201,7 +206,7 @@ void OnTimer()
       return;
    }
    
-   //--- Abrir nueva posición ---
+   // Open new position (random Long/Short)
    if(!g_hasPosition)
    {
       bool buy = (MathRand() % 2 == 0);
