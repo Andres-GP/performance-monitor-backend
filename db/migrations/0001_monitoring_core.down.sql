@@ -1,0 +1,10 @@
+DROP TABLE IF EXISTS unregistered_source;
+DROP TABLE IF EXISTS rule_state;
+DROP TABLE IF EXISTS alert;
+DROP TABLE IF EXISTS heartbeat;
+DROP TABLE IF EXISTS daily_stats;
+DROP TABLE IF EXISTS equity_sample;
+DROP TABLE IF EXISTS trade;
+DROP TABLE IF EXISTS event_raw;
+DROP TABLE IF EXISTS strategy;
+DROP TABLE IF EXISTS portfolio;
