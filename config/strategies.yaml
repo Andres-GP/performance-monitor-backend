@@ -1,0 +1,194 @@
+version: 1
+
+portfolios:
+  - id: P_AXI
+    broker: Axi Select
+    account_type: hedging
+    daily_dd_limit_pct: 5.0
+    total_dd_limit_pct: 8.5
+    broker_hard_limit_pct: 9.0
+    server_utc_offset_hours: null
+    server_utc_offset_verified: false
+  - id: P_DWX
+    broker: Darwinex
+    account_type: null
+    daily_dd_limit_pct: 3.0 # Más estricto: RSI2; revisar límite Gotobi.
+    total_dd_limit_pct: 8.0 # Más estricto: RSI2/D-Score; revisar límite Gotobi.
+    broker_hard_limit_pct: null
+    server_utc_offset_hours: null
+    server_utc_offset_verified: false
+
+strategies:
+  - id: MONDAY_BTCJPY
+    portfolio_id: P_AXI
+    strategy_name_prefix: ALPHACA_MONDAY_
+    magic: 290401
+    timeframe: H1
+    vehicle: BTCJPY CFD
+    direction: long
+    expected_size: {kind: equity_notional_fraction, value: 0.20}
+    contract_size: null
+    entry:
+      time: "00:00"
+      timezone: UTC
+      schedule: Monday, except first Monday of each month
+      filter: ATR(24)% >= 40th percentile of 8760 H1 bars
+    exit:
+      expected_duration_hours: 24
+      expected_duration_bars: 24
+      tolerance_minutes: 60
+      schedule: Tuesday 00:00 UTC, 24 H1 bars after entry
+    max_positions: 1
+    entry_tolerance_minutes: 15
+    max_bars_no_trade: 720
+    strategy_dd_daily_limit_pct: 5.0
+    strategy_dd_total_limit_pct: 8.5
+    edge_family: null
+    risk_cluster: CRYPTO_LONG
+    baselines:
+      bt_win_rate: null
+      bt_profit_factor: null
+      bt_avg_trade_pct: null
+      bt_max_dd_pct: null
+      bt_trades_per_month: null
+      bt_avg_hold_min: null
+
+  - id: GOTOBI_USDJPY_AXI
+    portfolio_id: P_AXI
+    strategy_name_prefix: ALPHACA_GOTOBI_
+    magic: 290402
+    timeframe: M5
+    vehicle: USDJPY CFD
+    direction: long
+    expected_size: {kind: equity_notional_fraction, value: 0.30, note: "EA comment mentions 250%; verify before use."}
+    contract_size: null
+    entry:
+      time: "22:30"
+      timezone: UTC
+      schedule: Previous day before Gotobi date (07:30 JST)
+      gotobi_dates: [5, 10, 15, 20, 25, 30, end_of_month]
+      calendar_adjustment: CSV calendar
+      excluded_dates: ["2023-12-25"]
+    exit:
+      expected_duration_minutes: 145
+      tolerance_minutes: 5
+      schedule: "00:55 UTC (09:55 JST) on Gotobi date"
+    max_positions: 1
+    entry_tolerance_minutes: 2
+    max_bars_no_trade: 4608
+    strategy_dd_daily_limit_pct: 5.0
+    strategy_dd_total_limit_pct: 8.5
+    limits_review_required: true
+    edge_family: GOTOBI
+    risk_cluster: null
+    baselines:
+      bt_win_rate: null
+      bt_profit_factor: null
+      bt_avg_trade_pct: null
+      bt_max_dd_pct: null
+      bt_trades_per_month: null
+      bt_avg_hold_min: null
+
+  - id: WEEKLYMOM_ETHUSD
+    portfolio_id: P_AXI
+    strategy_name_prefix: ALPHACA_WEEKLYMOM_
+    magic: 290403
+    timeframe: H1
+    vehicle: ETHUSD CFD
+    direction: long
+    expected_size: {kind: equity_notional_fraction, value: 0.05, min_lot_can_exceed: true}
+    contract_size: null
+    entry:
+      time: "00:00"
+      timezone: broker_server
+      schedule: Monday, only when 31-day momentum > 0
+    exit:
+      expected_duration_hours: 264
+      expected_duration_bars: 264
+      tolerance_minutes: 60
+      schedule_tolerance_minutes: 5
+      schedule: "00:00 broker-server time, 11 days after entry"
+    max_positions: 2
+    entry_tolerance_minutes: 5
+    max_bars_no_trade: 840
+    strategy_dd_daily_limit_pct: 5.0
+    strategy_dd_total_limit_pct: 8.5
+    known_risk:
+      key: KNOWN_RISK_WEEKLYMOM
+      message: Total kill limit (8.5%) lies within historical intrabar drawdown (approximately 8.8%, capital 3500).
+    edge_family: null
+    risk_cluster: CRYPTO_LONG
+    baselines:
+      bt_win_rate: null
+      bt_profit_factor: null
+      bt_avg_trade_pct: null
+      bt_max_dd_pct: null
+      bt_trades_per_month: null
+      bt_avg_hold_min: null
+
+  - id: GOTOBI_USDJPY_DWX
+    portfolio_id: P_DWX
+    strategy_name_prefix: ALPHACA_GOTOBI_DWX_
+    magic: 290412
+    timeframe: M5
+    vehicle: USDJPY Darwinex
+    direction: long
+    expected_size: {kind: equity_notional_fraction, value: 0.30}
+    contract_size: null
+    entry:
+      time: "22:30"
+      timezone: UTC
+      schedule: Previous day before Gotobi date (07:30 JST)
+      gotobi_dates: [5, 10, 15, 20, 25, 30, end_of_month]
+      calendar_adjustment: CSV calendar
+      excluded_dates: ["2023-12-25"]
+    exit:
+      expected_duration_minutes: 145
+      tolerance_minutes: 5
+      schedule: "00:55 UTC (09:55 JST) on Gotobi date"
+    max_positions: 1
+    entry_tolerance_minutes: 2
+    max_bars_no_trade: 4608
+    strategy_dd_daily_limit_pct: 5.0
+    strategy_dd_total_limit_pct: 8.5
+    limits_review_required: true
+    edge_family: GOTOBI
+    risk_cluster: null
+    baselines:
+      bt_win_rate: null
+      bt_profit_factor: null
+      bt_avg_trade_pct: null
+      bt_max_dd_pct: null
+      bt_trades_per_month: null
+      bt_avg_hold_min: null
+
+  - id: RSI2_QQQ
+    portfolio_id: P_DWX
+    strategy_name_prefix: TIS_RSI2_
+    magic: 100001
+    timeframe: D1
+    vehicle: QQQ (Darwinex)
+    direction: long
+    expected_size: {kind: risk_per_trade_fraction, value: 0.0033}
+    contract_size: null
+    entry:
+      schedule: RSI(2) < 20 and Close > SMA(230)
+    exit:
+      schedule: Two consecutive green candles
+      expected_duration_days: null
+      calibration_note: Typical hold 2-6 days; calibrate from trade history before enabling duration deviation alerts.
+      tolerance_minutes: null
+    max_positions: 1
+    entry_tolerance_minutes: null
+    max_bars_no_trade: 50
+    strategy_dd_daily_limit_pct: 3.0
+    strategy_dd_total_limit_pct: 8.0
+    edge_family: null
+    risk_cluster: null
+    baselines:
+      bt_win_rate: null
+      bt_profit_factor: null
+      bt_avg_trade_pct: null
+      bt_max_dd_pct: null
+      bt_trades_per_month: null
+      bt_avg_hold_min: null
