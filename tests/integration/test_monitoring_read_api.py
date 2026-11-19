@@ -45,6 +45,7 @@ def test_portfolio_list_and_detail_use_registered_portfolio_and_metrics(client, 
     }, {
         "strategy_id": "WEEKLYMOM_ETHUSD", "ts": "2026-11-19T19:59:20+00:00", "equity": 8000,
     }])
+    monitoring_tables["event_raw"] = _table([{"payload": {"mode": "live"}}])
     response = client.get("/portfolios?limit=1&offset=0", headers=auth_header)
     assert response.status_code == 200
     data = response.json()
@@ -58,6 +59,9 @@ def test_portfolio_list_and_detail_use_registered_portfolio_and_metrics(client, 
     assert len(response.json()["strategies"]) == 3
     assert response.json()["strategies"][0]["last_heartbeat_at"] == "2026-11-19T19:59:00+00:00"
     assert response.json()["equity_curve"][0]["equity"] == 20000
+    assert response.json()["strategies"][0]["expected_mode"] == "demo"
+    assert response.json()["strategies"][0]["current_mode"] == "live"
+    assert response.json()["strategies"][0]["mode_status"] == "mode_mismatch"
 
 
 def test_strategy_detail_and_paginated_date_filtered_trades(client, auth_header, monitoring_tables):

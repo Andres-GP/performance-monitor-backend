@@ -36,6 +36,9 @@ def test_workflow_dispatch_contract_has_manual_fixture_path():
     workflow = yaml.load(Path(".github/workflows/weekly_review.yml").read_text(), Loader=yaml.BaseLoader)
     assert workflow["on"]["schedule"][0]["cron"] == "0 6 * * 1"
     assert "workflow_dispatch" in workflow["on"]
+    workflow_text = Path(".github/workflows/weekly_review.yml").read_text()
+    assert "Send weekly SOP email" in workflow_text
+    assert "SOP_EMAIL_TO: andresgarciapedreros@gmail.com" in workflow_text
 
 
 def test_step19_combines_checks_without_writing_human_decisions(tmp_path):
@@ -57,3 +60,39 @@ def test_step19_combines_checks_without_writing_human_decisions(tmp_path):
     assert "TRADE_RECONCILIATION_MISMATCH" in checklist
     assert checks["review"][0]["state"] == "REVIEW_REQUIRED"
     assert Path("reports/decisions.csv").read_bytes() == before
+
+
+def test_sop_email_is_branded_and_shows_account_mode():
+    from reports.weekly.email import RECIPIENT, render_sop_email
+
+    html = render_sop_email({
+        "week": "2026-W47", "worst_ehi": 58.5, "market_data_warning": "Test market note",
+        "review": {"status": "DATA_LIMITED", "strategies": [{"strategy_id": "S1", "state": "NO_VERDICT_DATA_LIMITED", "signals": []}]},
+        "strategies": [{"portfolio_id": "P_AXI", "strategy_id": "S1", "expected_mode": "demo", "current_mode": "live", "mode_status": "mode_mismatch", "backtest_state": "NO_BASELINE", "ehi": None}],
+    })
+    assert RECIPIENT == "andresgarciapedreros@gmail.com"
+    assert "#1f3d36" in html and "#c8f5a8" in html
+    assert "Capital real · no coincide con lo esperado (demo)" in html
+    assert "P_AXI" in html and "ALPHACA CAPITAL" in html
+    assert "Checklist SOP" in html and "□" in html
+
+
+def test_sop_email_delivery_uses_requested_recipient(monkeypatch):
+    from reports.weekly.email import RECIPIENT, send_sop_email
+
+    class Response:
+        def raise_for_status(self):
+            pass
+        def json(self):
+            return {"id": "mail-id"}
+
+    captured = {}
+    def fake_post(url, **kwargs):
+        captured.update(url=url, **kwargs)
+        return Response()
+
+    monkeypatch.setattr("reports.weekly.email.requests.post", fake_post)
+    result = send_sop_email("<html></html>", api_key="test-key", from_email="ops@example.com", subject="Weekly SOP")
+    assert result["id"] == "mail-id"
+    assert captured["url"] == "https://api.resend.com/emails"
+    assert captured["json"]["to"] == [RECIPIENT]

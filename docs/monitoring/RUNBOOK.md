@@ -33,6 +33,12 @@
 - Para una estrategia nueva: añadir portfolio si hace falta, después la estrategia con ID único, prefijo exacto, magic, vehículo, horario, dirección, tamaño, límites, calendario, familia/clúster y baselines. Validar con `pytest -q tests/unit/test_strategy_registry.py` antes del despliegue.
 - No inferir offsets del broker. Marcar `server_utc_offset_verified` solo con evidencia vigente; todos los timestamps normalizados se almacenan en UTC.
 
+## Modo demo / capital real y SOP semanal
+
+- Cada estrategia declara `expected_mode` (`demo` o `live`) en `config/strategies.yaml`. El portfolio también muestra el último modo observado en el evento `strategy_started`; si no existe evento, marca el modo como no confirmado. Si el observado difiere del esperado, revisar terminal/broker antes de continuar y no tratarlo como una confirmación de capital real.
+- El workflow semanal genera `sop_email.html` y lo envía por Resend a `andresgarciapedreros@gmail.com` cuando existe `RESEND_API_KEY`. Configurar ese GitHub Secret y `RESEND_FROM_EMAIL` con un remitente validado en Resend. Los runs con fixture no envían correo. `WEEKLY_DASHBOARD_URL` es opcional; `SOP_EMAIL_TO` tiene ese destinatario como valor por defecto.
+- La plantilla del correo usa la paleta local de la marca (verde bosque y lima), incluye estado por portfolio/estrategia, modo observado/esperado, señales y checklist SOP; no ejecuta ni cambia operaciones. Si el secreto de Resend falta, el workflow informa que omitió el envío.
+
 ## Entorno y simulación
 
 - Requeridas para backend: `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `API_SECRET_KEY`. Auth de usuario: `CLERK_JWKS_URL`, `CLERK_ISSUER`; webhook: `ALERT_WEBHOOK_URL`. Email legacy: `RESEND_API_KEY`, `RESEND_FROM_EMAIL`, `ALERT_EMAIL_TO`.

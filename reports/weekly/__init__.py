@@ -121,6 +121,10 @@ def build_summary(
         strategies.append({
             "strategy_id": strategy.id,
             "portfolio_id": strategy.portfolio_id,
+            "expected_mode": strategy.expected_mode,
+            "current_mode": live.get("current_mode"),
+            "mode_status": live.get("mode_status", "unconfirmed"),
+            "mode_observed_at": live.get("mode_observed_at"),
             "live_metrics": analysis["live_metrics"],
             "backtest_analysis": analysis,
             "backtest_state": backtest_state,
@@ -191,6 +195,8 @@ def write_artifacts(summary: dict[str, Any], output_root: Path) -> Path:
             signals.append("ADVERSE_REGIME_HYPOTHESIS" if not regime_row.get("hypothesis_confirmed") else "CONFIRMED_ADVERSE_REGIME")
         if reconciliation.get("mismatches"):
             signals.append("TRADE_RECONCILIATION_MISMATCH")
+        if row.get("mode_status") == "mode_mismatch":
+            signals.append("ACCOUNT_MODE_MISMATCH")
         limitations = []
         if row.get("backtest_state") in unavailable_states:
             limitations.append(row["backtest_state"])
@@ -231,12 +237,12 @@ def write_artifacts(summary: dict[str, Any], output_root: Path) -> Path:
     render_regime_heatmaps(summary.get("regime_report", {}), week_dir / "charts")
     history_charts = render_ehi_history(summary["week"], summary["strategies"], output_root)
     with (week_dir / "ehi.csv").open("w", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=["week", "strategy_id", "ehi", "band", "status", "backtest_component", "regime_component", "backtest_state", "regime_component_state"])
+        writer = csv.DictWriter(handle, fieldnames=["week", "portfolio_id", "strategy_id", "expected_mode", "current_mode", "mode_status", "mode_observed_at", "ehi", "band", "status", "backtest_component", "regime_component", "backtest_state", "regime_component_state"])
         writer.writeheader()
         for row in summary["strategies"]:
             components = row.get("ehi_components", {})
             component_states = row.get("ehi_component_states", {})
-            writer.writerow({"week": summary["week"], "strategy_id": row["strategy_id"], "ehi": row.get("ehi") if row.get("ehi") is not None else "", "band": row.get("ehi_band", "N/A"), "status": row.get("ehi_status", "NOT_CALCULATED"), "backtest_component": components.get("backtest_percentile"), "regime_component": components.get("regime_score"), "backtest_state": row["backtest_state"], "regime_component_state": component_states.get("regime", "NOT_CALCULATED")})
+            writer.writerow({"week": summary["week"], "portfolio_id": row.get("portfolio_id"), "strategy_id": row["strategy_id"], "expected_mode": row.get("expected_mode"), "current_mode": row.get("current_mode"), "mode_status": row.get("mode_status", "unconfirmed"), "mode_observed_at": row.get("mode_observed_at"), "ehi": row.get("ehi") if row.get("ehi") is not None else "", "band": row.get("ehi_band", "N/A"), "status": row.get("ehi_status", "NOT_CALCULATED"), "backtest_component": components.get("backtest_percentile"), "regime_component": components.get("regime_score"), "backtest_state": row["backtest_state"], "regime_component_state": component_states.get("regime", "NOT_CALCULATED")})
     review_by_id = {row["strategy_id"]: row for row in review_rows}
     status_lines = "\n".join(
         f"- [ ] **{row['strategy_id']}** — `{review_by_id[row['strategy_id']]['state']}`; backtest `{row['backtest_state']}`; régimen `{row['regime_state']}`; EHI `{row.get('ehi') if row.get('ehi') is not None else 'N/D'}` ({row.get('ehi_band', 'N/A')}). "
@@ -259,7 +265,7 @@ def write_artifacts(summary: dict[str, Any], output_root: Path) -> Path:
         f"- {summary.get('market_data_warning', 'Contexto de mercado no disponible.')}",
         "- Interpretar bootstrap, régimen, reconciliación y EHI conjuntamente; ninguna regla modifica operaciones.", "",
         f"Las comparaciones live/backtest usan bootstrap por bloques cuando existe CSV y n≥20. {summary.get('market_data_warning', 'Market context unavailable.')} Este reporte no es una recomendación de trading.", "",
-        "| Estrategia | Revisión | Estado backtest | Régimen | Lectura actual | EHI | Señales |", "|---|---|---|---|---|---:|---|",
+        "| Portfolio | Estrategia | Modo observado / esperado | Revisión | Estado backtest | Régimen | Lectura actual | EHI | Señales |", "|---|---|---|---|---|---|---|---:|---|",
     ]
     def regime_label(row):
         current = row["regime_analysis"].get("current_regime")
@@ -268,11 +274,15 @@ def write_artifacts(summary: dict[str, Any], output_root: Path) -> Path:
         return f"{current['trend']} {current['direction']}; vol {current['volatility']}; close {current['price']} SMA200"
 
     report_lines.extend(
-        f"| {row['strategy_id']} | {review_by_id[row['strategy_id']]['state']} | {row['backtest_state']} | {row['regime_state']}{' (hipótesis no confirmada)' if row['regime_analysis'].get('status') == 'ADVERSE_HYPOTHESIS' and not row['regime_analysis'].get('hypothesis_confirmed') else ''} | {regime_label(row)} | {row.get('ehi') if row.get('ehi') is not None else 'N/D'} ({row.get('ehi_band', 'N/A')}) | {', '.join(review_by_id[row['strategy_id']]['signals']) or '—'} |"
+        f"| {row.get('portfolio_id', '—')} | {row['strategy_id']} | {row.get('current_mode') or 'Sin confirmar'} / {row.get('expected_mode', '—')} | {review_by_id[row['strategy_id']]['state']} | {row['backtest_state']} | {row['regime_state']}{' (hipótesis no confirmada)' if row['regime_analysis'].get('status') == 'ADVERSE_HYPOTHESIS' and not row['regime_analysis'].get('hypothesis_confirmed') else ''} | {regime_label(row)} | {row.get('ehi') if row.get('ehi') is not None else 'N/D'} ({row.get('ehi_band', 'N/A')}) | {', '.join(review_by_id[row['strategy_id']]['signals']) or '—'} |"
         for row in summary["strategies"]
     )
     report_lines.extend(["", "## Límites y referencias", "", "- [Checklist SOP](sop_checklist.md)", "- [Verificación live vs backtest](check_vs_backtest.json)", "- [Verificación de régimen](check_regime.json)", "- Decisiones humanas: `reports/decisions.csv` (registro externo al reporte; no se modifica automáticamente).", "- EHI: promedio ponderado 50/50 de percentiles bootstrap (expectancy, profit factor, win rate) y componente de régimen; bandas provisionalmente rojo <30, ámbar 30–69, verde ≥70. Hipótesis de régimen no confirmadas usan neutral 50.", "- Los datos de referencia de Yahoo Finance pueden diferir del CFD del broker; las hipótesis permanecen sin confirmar hasta su revisión."])
     (week_dir / "report.md").write_text("\n".join(report_lines) + "\n")
+    from .email import render_sop_email
+    (week_dir / "sop_email.html").write_text(
+        render_sop_email(summary, dashboard_url=os.getenv("WEEKLY_DASHBOARD_URL")), encoding="utf-8",
+    )
     return week_dir
 
 

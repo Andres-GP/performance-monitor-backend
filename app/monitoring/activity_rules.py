@@ -114,7 +114,7 @@ def _as_utc(value: str | datetime | None) -> datetime | None:
     return parsed.astimezone(UTC)
 
 
-def _normalize_mode(value: Any) -> str | None:
+def normalize_mode(value: Any) -> str | None:
     if value is None:
         return None
     mode = str(value).strip().lower()
@@ -126,7 +126,7 @@ def _normalize_mode(value: Any) -> str | None:
 
 
 def _mode_from_payload(payload: dict[str, Any]) -> str | None:
-    return _normalize_mode(payload.get("mode") or payload.get("data_type"))
+    return normalize_mode(payload.get("mode") or payload.get("data_type"))
 
 
 def _health_event_type(payload: dict[str, Any]) -> str:
@@ -206,7 +206,7 @@ def evaluate_activity_rules(
     if len(recent_starts) >= 3:
         add("RESTART_LOOP", "high", {"starts_last_hour": len(recent_starts), "threshold": 3})
 
-    current_mode = _normalize_mode(snapshot.get("current_mode"))
+    current_mode = normalize_mode(snapshot.get("current_mode"))
     if current_mode and current_mode != strategy.expected_mode:
         add("MODE_MISMATCH", "medium", {
             "actual_mode": current_mode,

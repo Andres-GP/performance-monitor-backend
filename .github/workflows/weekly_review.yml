@@ -52,6 +52,7 @@ jobs:
           MONITOR_API_TOKEN: ${{ secrets.MONITOR_API_TOKEN }}
           ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
           LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          WEEKLY_DASHBOARD_URL: ${{ secrets.WEEKLY_DASHBOARD_URL }}
         run: |
           if [ "$WEEK" = "auto" ]; then WEEK="$(date -u +%G-W%V)"; fi
           echo "week=$WEEK" >> "$GITHUB_OUTPUT"
@@ -101,6 +102,16 @@ jobs:
             } else {
               await github.rest.issues.create({ ...context.repo, title, body, labels: [label] });
             }
+
+      - name: Send weekly SOP email
+        if: success() && inputs.fixture != true
+        env:
+          WEEK: ${{ steps.report.outputs.week }}
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          RESEND_FROM_EMAIL: ${{ secrets.RESEND_FROM_EMAIL || 'onboarding@resend.dev' }}
+          SOP_EMAIL_TO: andresgarciapedreros@gmail.com
+          WEEKLY_DASHBOARD_URL: ${{ secrets.WEEKLY_DASHBOARD_URL }}
+        run: python -m reports.weekly.email --week "$WEEK"
 
       - name: Create failure issue
         if: failure()

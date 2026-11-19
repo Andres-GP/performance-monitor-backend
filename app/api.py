@@ -23,6 +23,7 @@ from .models import StrategyInfo, TradeRecord
 from .monitoring.ingestion import EventValidationError, SupabaseMonitoringRepository, ingest_event
 from .monitoring.alert_lifecycle import SupabaseAlertLifecycleRepository, acknowledge_alert
 from .monitoring.strategies import load_registry
+from .monitoring.activity_rules import normalize_mode
 from .utils.logger import setup_logger
 
 logger = setup_logger(__name__)
@@ -333,9 +334,18 @@ def create_app() -> FastAPI:
                 supabase.table("heartbeat").select("ts").eq("strategy_id", strategy.id)
                 .order("ts", desc=True).limit(1).execute().data or []
             )
+            starts = (
+                supabase.table("event_raw").select("payload,received_at").eq("strategy_id", strategy.id)
+                .eq("event_type", "strategy_started").order("received_at", desc=True).limit(1).execute().data or []
+            )
+            start_payload = (starts[0].get("payload") or {}) if starts else {}
+            observed_mode = normalize_mode(start_payload.get("mode") or start_payload.get("data_type"))
             alerts.extend(strategy_alerts)
             strategies.append({
                 **strategy.model_dump(mode="json"),
+                "current_mode": observed_mode,
+                "mode_status": "unconfirmed" if observed_mode is None else "matches_expected" if observed_mode == strategy.expected_mode else "mode_mismatch",
+                "mode_observed_at": starts[0].get("received_at") if starts else None,
                 "metrics": stats[0] if stats else None,
                 "alerts": strategy_alerts,
                 "last_heartbeat_at": heartbeat[0].get("ts") if heartbeat else None,
