@@ -18,13 +18,32 @@ def run_sqlite_compatible_migration(connection, sql):
         sql,
         flags=re.IGNORECASE,
     )
+    # RLS is PostgreSQL/Supabase-specific. Verify its declarations separately and
+    # omit only those statements while exercising table structure in SQLite.
+    sqlite_sql = re.sub(
+        r"ALTER\s+TABLE\s+public\.\w+\s+ENABLE\s+ROW\s+LEVEL\s+SECURITY\s*;",
+        "",
+        sqlite_sql,
+        flags=re.IGNORECASE,
+    )
     connection.executescript(sqlite_sql)
 
 
 def test_monitoring_migration_up_creates_tables_indexes_and_constraints():
+    migration_sql = UP.read_text(encoding="utf-8")
+    rls_tables = set(re.findall(
+        r"ALTER\s+TABLE\s+public\.(\w+)\s+ENABLE\s+ROW\s+LEVEL\s+SECURITY\s*;",
+        migration_sql,
+        flags=re.IGNORECASE,
+    ))
+    assert {
+        "portfolio", "strategy", "event_raw", "trade", "equity_sample", "daily_stats",
+        "heartbeat", "alert", "rule_state", "unregistered_source",
+    } <= rls_tables
+
     connection = sqlite3.connect(":memory:")
     connection.execute("PRAGMA foreign_keys = ON")
-    run_sqlite_compatible_migration(connection, UP.read_text(encoding="utf-8"))
+    run_sqlite_compatible_migration(connection, migration_sql)
 
     tables = {
         row[0]
