@@ -17,3 +17,5 @@
 - Nota: tamaño, RSI2 hold y `MISSED_SLOT` quedan condicionados por datos faltantes/calendario; ver `GAPS.md`.
 - [x] Paso 8 — Reglas D: deriva de win rate, profit factor, expectancy, frecuencia, costos y racha frente al backtest.
 - Nota: las reglas no disparan con baselines `null`; `COST_DRIFT` requiere comisión, swap estimado y baseline.
+- [x] Paso 9 — Capa de portafolio: P&L realizado por período, contribución por estrategia, curvas, correlación rolling y divergencia Gotobi.
+- Nota: backlog EDA deduplicado añadido en `EDA_BACKLOG.md` para integrar con pasos 11–12 y 16–19; posiciones/exposición quedan pendientes de datos EA.

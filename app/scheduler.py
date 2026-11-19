@@ -8,6 +8,7 @@ from .monitor import PerformanceMonitor
 from .monitoring.activity_rules import run_activity_rules
 from .monitoring.derived_metrics import run_metrics_job, server_daily_close_utc
 from .monitoring.edge_rules import run_edge_rules
+from .monitoring.portfolio_layer import run_portfolio_layer
 from .monitoring.risk_rules import run_risk_rules
 from .monitoring.strategies import load_registry
 from .utils.logger import setup_logger
@@ -67,6 +68,21 @@ class Scheduler:
                 )
             except Exception:
                 logger.exception("Edge decay rules job failed")
+            try:
+                portfolio_result = await asyncio.to_thread(
+                    run_portfolio_layer,
+                    client,
+                    self.registry,
+                    result,
+                )
+                logger.info(
+                    "Updated portfolio layer: %d portfolio aggregates, %d correlations, %d alerts",
+                    len(portfolio_result["portfolios"]),
+                    len(portfolio_result["correlations"]),
+                    len(portfolio_result["alerts"]),
+                )
+            except Exception:
+                logger.exception("Portfolio analytics job failed")
         try:
             alerts = await asyncio.to_thread(
                 run_activity_rules,

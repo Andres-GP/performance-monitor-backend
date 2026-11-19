@@ -45,7 +45,12 @@ def test_monitoring_migration_up_creates_tables_indexes_and_constraints():
     daily_stats_columns = {
         row[1] for row in connection.execute("PRAGMA table_info(daily_stats)")
     }
-    assert {"performance_equity", "peak_equity", "rolling_20", "rolling_50"} <= daily_stats_columns
+    assert {
+        "performance_equity", "peak_equity", "rolling_20", "rolling_50",
+        "pnl_daily_realized", "pnl_weekly_realized", "pnl_monthly_realized",
+        "open_positions_count", "gross_notional_over_equity", "strategy_contribution_30d",
+        "correlation_matrix",
+    } <= daily_stats_columns
 
     connection.execute("INSERT INTO portfolio (id, broker, daily_dd_limit_pct, total_dd_limit_pct) VALUES ('P', 'Broker', 3, 8)")
     connection.execute("INSERT INTO strategy (id, portfolio_id, strategy_name_prefix, magic, timeframe, vehicle, direction) VALUES ('S', 'P', 'S_', 1, 'H1', 'CFD', 'long')")
