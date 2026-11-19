@@ -11,3 +11,5 @@
 - Nota: DD diario/fecha solo se persisten con offset verificado; equity actual del EA sigue ausente (ver `GAPS.md`).
 - [x] Paso 5 — Reglas A: vida y actividad (heartbeat/equity stale, EAStopped, inactividad, reinicios y modo esperado).
 - Nota: calendarios de cripto, FX y QQQ; `expected_mode` queda en demo según el estado actual del proyecto. Auto-resolución queda para el paso 10.
+- [x] Paso 6 — Reglas B: drawdown diario/total por estrategia y portafolio, KillSwitch, límite duro del broker y `KNOWN_RISK_WEEKLYMOM`.
+- Nota: DD diario se mantiene desactivado mientras el offset de servidor sea `null`; backtest queda desactivado con baselines `null`.

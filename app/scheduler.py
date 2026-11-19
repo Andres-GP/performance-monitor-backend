@@ -7,6 +7,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 from .monitor import PerformanceMonitor
 from .monitoring.activity_rules import run_activity_rules
 from .monitoring.derived_metrics import run_metrics_job, server_daily_close_utc
+from .monitoring.risk_rules import run_risk_rules
 from .monitoring.strategies import load_registry
 from .utils.logger import setup_logger
 
@@ -23,6 +24,7 @@ class Scheduler:
         if client is None:
             logger.warning("Derived monitoring metrics skipped: Supabase client unavailable")
             return
+        result = None
         try:
             result = await asyncio.to_thread(
                 run_metrics_job,
@@ -37,6 +39,18 @@ class Scheduler:
             )
         except Exception:
             logger.exception("Derived monitoring metrics job failed")
+        if result is not None:
+            try:
+                risk_alerts = await asyncio.to_thread(
+                    run_risk_rules,
+                    client,
+                    self.registry,
+                    result,
+                )
+                if risk_alerts:
+                    logger.info("Evaluated risk rules; active signals: %d", len(risk_alerts))
+            except Exception:
+                logger.exception("Risk rules job failed")
         try:
             alerts = await asyncio.to_thread(
                 run_activity_rules,
