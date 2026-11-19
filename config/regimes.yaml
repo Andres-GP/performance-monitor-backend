@@ -1,0 +1,55 @@
+version: 1
+market_tickers:
+  QQQ: QQQ
+  ETHUSD: ETH-USD
+  BTCJPY: BTC-JPY
+  USDJPY: JPY=X
+lookbacks:
+  atr_days: 14
+  volatility_percentile_days: 252
+  kaufman_days: 31
+  sma_days: 200
+thresholds:
+  volatility_low_below: 33
+  volatility_high_above: 66
+  kaufman_trend_min: 0.30
+strategies:
+  RSI2_QQQ:
+    instrument: QQQ
+    favorable:
+      price: [ABOVE]
+      volatility: [LOW, MID]
+    adverse:
+      any:
+        - {price: [BELOW]}
+        - {volatility: [HIGH]}
+    hypothesis_confirmed: false
+  MONDAY_BTCJPY:
+    instrument: BTCJPY
+    favorable:
+      volatility: [MID, HIGH]
+    adverse:
+      volatility: [LOW]
+    hypothesis_confirmed: false
+  WEEKLYMOM_ETHUSD:
+    instrument: ETHUSD
+    favorable:
+      trend: [TREND]
+      direction: [UP]
+    adverse:
+      any:
+        - {trend: [CHOP]}
+        - {direction: [DOWN]}
+    hypothesis_confirmed: false
+  GOTOBI_USDJPY_AXI:
+    instrument: USDJPY
+    informational_only: true
+    adverse:
+      volatility: [HIGH]
+    hypothesis_confirmed: false
+  GOTOBI_USDJPY_DWX:
+    instrument: USDJPY
+    informational_only: true
+    adverse:
+      volatility: [HIGH]
+    hypothesis_confirmed: false

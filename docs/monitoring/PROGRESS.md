@@ -33,3 +33,5 @@
 - Nota: el runner informa estados sin baseline/régimen y no genera EHI ficticio; conos del Paso 16 requieren CSV de backtest y el EHI queda para pasos posteriores.
 - [x] Paso 16 — Métricas live por ventanas, bootstrap circular por bloques (10 000, bloque 3), cono P5–P95, conciliación opcional y `check_vs_backtest.json`.
 - Nota: no hay CSVs de backtest ni logs del motor en el repo; se conserva `NO_BASELINE`, con métricas live y sin veredicto donde corresponda.
+- [x] Paso 17 — Régimen de referencia Yahoo por instrumento (ATR%, Kaufman ER, SMA200), ocho semanas, episodios >5%, heatmaps live/activo y backtest condicional.
+- Nota: hipótesis de régimen siguen `hypothesis_confirmed: false`; precios son referencia, no CFD. El prompt adjunto se corta tras el inicio del cálculo condicional.

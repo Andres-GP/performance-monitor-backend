@@ -100,6 +100,7 @@ def test_writer_renders_cone_chart_when_comparison_is_available(tmp_path):
             "strategy_id": "MONDAY_BTCJPY", "backtest_state": "COMPARED",
             "regime_state": "PENDING_STEP_17", "status": "COMPARED", "ehi": None,
             "backtest_analysis": analysis,
+                "regime_analysis": {"status": "PENDING_STEP_17", "verdict": None},
         }],
     }
     folder = write_artifacts(summary, tmp_path)

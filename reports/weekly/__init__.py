@@ -8,12 +8,13 @@ import json
 import os
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import requests
 
 from app.monitoring.strategies import load_registry
 from .backtest import strategy_backtest_analysis
+from .regime import build_regime_report, render_regime_heatmaps
 
 UTC = timezone.utc
 
@@ -59,12 +60,21 @@ def _fetch_live(api_url: str, token: str) -> dict[str, Any]:
                     break
                 offset += len(items)
             strategy["trades"] = trades
-            samples_response = session.get(
-                f"{api_url.rstrip('/')}/strategies/{strategy_id}/equity?limit=2000",
-                timeout=30,
-            )
-            samples_response.raise_for_status()
-            strategy["equity_samples"] = samples_response.json().get("items", [])
+            equity_samples = []
+            offset = 0
+            while True:
+                samples_response = session.get(
+                    f"{api_url.rstrip('/')}/strategies/{strategy_id}/equity?limit=2000&offset={offset}",
+                    timeout=30,
+                )
+                samples_response.raise_for_status()
+                sample_page = samples_response.json()
+                items = sample_page.get("items", [])
+                equity_samples.extend(items)
+                if not items or len(equity_samples) >= (sample_page.get("total") or len(equity_samples)):
+                    break
+                offset += len(items)
+            strategy["equity_samples"] = equity_samples
         portfolios.append(portfolio)
     return {"portfolios": portfolios, "source": "monitor_api"}
 
@@ -76,12 +86,22 @@ def build_summary(
     now: datetime | None = None,
     backtest_dir: Path = Path("data/backtests"),
     reconciliation_file: Path | None = None,
+    market_downloader: Callable[..., Any] | None = None,
 ) -> dict[str, Any]:
     registry = load_registry()
     live_by_id = {}
     for portfolio in source.get("portfolios", []):
         for strategy in portfolio.get("strategies", []):
             live_by_id[strategy.get("id", "")] = strategy
+
+    regime_options = {
+        "backtest_dir": backtest_dir,
+        "market_data_enabled": source.get("source") != "simulator_fixture",
+    }
+    if market_downloader is not None:
+        regime_options["downloader"] = market_downloader
+    regime_report = build_regime_report(week, source, **regime_options)
+    regime_by_id = {row["strategy_id"]: row for row in regime_report["strategies"]}
 
     strategies = []
     for strategy in registry.strategies:
@@ -93,6 +113,7 @@ def build_summary(
             recon_file=reconciliation_file,
             week_seed=week,
         )
+        regime_analysis = regime_by_id.get(strategy.id, {"status": "UNCONFIGURED", "verdict": None})
         backtest_state = analysis["status"]
         strategies.append({
             "strategy_id": strategy.id,
@@ -100,7 +121,8 @@ def build_summary(
             "live_metrics": analysis["live_metrics"],
             "backtest_analysis": analysis,
             "backtest_state": backtest_state,
-            "regime_state": "PENDING_STEP_17",
+            "regime_state": regime_analysis["status"],
+            "regime_analysis": regime_analysis,
             "ehi": None,
             "status": "NO_BASELINE" if backtest_state == "NO_BASELINE" else backtest_state,
             "note": "Sin CSV de backtest verificable; se reportan métricas live sin veredicto." if backtest_state == "NO_BASELINE" else "Comparación bootstrap lista; el EHI se calcula en pasos posteriores.",
@@ -110,7 +132,8 @@ def build_summary(
         "week": week,
         "generated_at": timestamp,
         "source": source.get("source", "fixture"),
-        "market_data_warning": "Sin clasificador de régimen hasta completar el Paso 17.",
+        "market_data_warning": regime_report["market_data_note"],
+        "regime_report": regime_report,
         "strategies": strategies,
         "worst_ehi": None,
         "status": "PENDING_ANALYSIS",
@@ -123,7 +146,7 @@ def write_artifacts(summary: dict[str, Any], output_root: Path) -> Path:
     (week_dir / "charts").mkdir(exist_ok=True)
     (week_dir / "summary.json").write_text(json.dumps(summary, indent=2, ensure_ascii=False) + "\n")
     (week_dir / "charts" / "README.md").write_text(
-        "Per-strategy cone charts are written only when both live trades and valid backtest rows exist. Market-regime charts follow in Step 17.\n"
+        "Cone and market heatmap charts are written when their live, backtest, and reference-market source data are available. EHI charts follow in Step 18.\n"
     )
     backtest = {
         "week": summary["week"],
@@ -136,7 +159,13 @@ def write_artifacts(summary: dict[str, Any], output_root: Path) -> Path:
     }
     regime = {
         "week": summary["week"],
-        "strategies": [{"strategy_id": row["strategy_id"], "status": row["regime_state"], "verdict": None} for row in summary["strategies"]],
+        "market_data_note": summary.get("market_data_warning", "Market context unavailable."),
+        "strategies": [{
+            "strategy_id": row["strategy_id"],
+            "status": row["regime_state"],
+            "verdict": row["regime_analysis"].get("verdict"),
+            "analysis": row["regime_analysis"],
+        } for row in summary["strategies"]],
     }
     (week_dir / "check_vs_backtest.json").write_text(json.dumps(backtest, indent=2) + "\n")
     (week_dir / "check_regime.json").write_text(json.dumps(regime, indent=2) + "\n")
@@ -159,6 +188,7 @@ def write_artifacts(summary: dict[str, Any], output_root: Path) -> Path:
             fig.tight_layout()
             fig.savefig(week_dir / "charts" / f"{row['strategy_id']}_cone.png", dpi=140)
             plt.close(fig)
+    render_regime_heatmaps(summary.get("regime_report", {}), week_dir / "charts")
     with (week_dir / "ehi.csv").open("w", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=["strategy_id", "ehi", "band", "status"])
         writer.writeheader()
@@ -173,11 +203,20 @@ def write_artifacts(summary: dict[str, Any], output_root: Path) -> Path:
     report_lines = [
         f"# Revisión semanal — {summary['week']}", "",
         f"Estado: `{summary['status']}`. El EHI se añadirá en pasos posteriores.", "",
-        "Las comparaciones live/backtest usan bootstrap por bloques cuando existe CSV y n≥20. El régimen sigue pendiente del Paso 17. Este reporte no es una recomendación de trading.", "",
-        "| Estrategia | Estado backtest | Estado régimen | EHI |", "|---|---|---|---:|",
+        f"Las comparaciones live/backtest usan bootstrap por bloques cuando existe CSV y n≥20. {summary.get('market_data_warning', 'Market context unavailable.')} Este reporte no es una recomendación de trading.", "",
+        "| Estrategia | Estado backtest | Estado régimen | Lectura actual | EHI |", "|---|---|---|---|---:|",
     ]
-    report_lines.extend(f"| {row['strategy_id']} | {row['backtest_state']} | {row['regime_state']} | — |" for row in summary["strategies"])
-    report_lines.extend(["", "Fuente de mercado de referencia y advertencia CFD se añadirán con el Paso 17."])
+    def regime_label(row):
+        current = row["regime_analysis"].get("current_regime")
+        if not current:
+            return "—"
+        return f"{current['trend']} {current['direction']}; vol {current['volatility']}; close {current['price']} SMA200"
+
+    report_lines.extend(
+        f"| {row['strategy_id']} | {row['backtest_state']} | {row['regime_state']} | {regime_label(row)} | — |"
+        for row in summary["strategies"]
+    )
+    report_lines.extend(["", summary.get("market_data_warning", "Market context unavailable.")])
     (week_dir / "report.md").write_text("\n".join(report_lines) + "\n")
     return week_dir
 
