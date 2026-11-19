@@ -30,4 +30,6 @@
 - [x] Paso 14 — Runbook operativo y `GAPS.md` consolidado con cambios de contrato EA, entorno, baselines y actuación por severidad.
 - Nota: `docs/monitoring/RUNBOOK.md` queda dentro del límite de 80 líneas; se preservan offsets y baselines desconocidos sin inventar valores.
 - [x] Paso 15 — Workflow semanal cron/manual, issue idempotente y runner de artefactos con fixture offline del simulador.
-- Nota: el runner informa `NO_BASELINE`/`PENDING_STEP_17` y no genera EHI ni gráficas ficticias; completar checks y gráficos en los pasos 16–19.
+- Nota: el runner informa estados sin baseline/régimen y no genera EHI ficticio; conos del Paso 16 requieren CSV de backtest y el EHI queda para pasos posteriores.
+- [x] Paso 16 — Métricas live por ventanas, bootstrap circular por bloques (10 000, bloque 3), cono P5–P95, conciliación opcional y `check_vs_backtest.json`.
+- Nota: no hay CSVs de backtest ni logs del motor en el repo; se conserva `NO_BASELINE`, con métricas live y sin veredicto donde corresponda.

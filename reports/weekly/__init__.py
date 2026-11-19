@@ -13,6 +13,7 @@ from typing import Any
 import requests
 
 from app.monitoring.strategies import load_registry
+from .backtest import strategy_backtest_analysis
 
 UTC = timezone.utc
 
@@ -40,11 +41,42 @@ def _fetch_live(api_url: str, token: str) -> dict[str, Any]:
     for item in page.get("items", []):
         detail = session.get(f"{api_url.rstrip('/')}/portfolios/{item['id']}", timeout=30)
         detail.raise_for_status()
-        portfolios.append(detail.json())
+        portfolio = detail.json()
+        for strategy in portfolio.get("strategies", []):
+            strategy_id = strategy["id"]
+            trades = []
+            offset = 0
+            while True:
+                response = session.get(
+                    f"{api_url.rstrip('/')}/strategies/{strategy_id}/trades?limit=1000&offset={offset}",
+                    timeout=30,
+                )
+                response.raise_for_status()
+                trade_page = response.json()
+                items = trade_page.get("items", [])
+                trades.extend(items)
+                if not items or len(trades) >= (trade_page.get("total") or len(trades)):
+                    break
+                offset += len(items)
+            strategy["trades"] = trades
+            samples_response = session.get(
+                f"{api_url.rstrip('/')}/strategies/{strategy_id}/equity?limit=2000",
+                timeout=30,
+            )
+            samples_response.raise_for_status()
+            strategy["equity_samples"] = samples_response.json().get("items", [])
+        portfolios.append(portfolio)
     return {"portfolios": portfolios, "source": "monitor_api"}
 
 
-def build_summary(week: str, source: dict[str, Any], *, now: datetime | None = None) -> dict[str, Any]:
+def build_summary(
+    week: str,
+    source: dict[str, Any],
+    *,
+    now: datetime | None = None,
+    backtest_dir: Path = Path("data/backtests"),
+    reconciliation_file: Path | None = None,
+) -> dict[str, Any]:
     registry = load_registry()
     live_by_id = {}
     for portfolio in source.get("portfolios", []):
@@ -54,17 +86,24 @@ def build_summary(week: str, source: dict[str, Any], *, now: datetime | None = N
     strategies = []
     for strategy in registry.strategies:
         live = live_by_id.get(strategy.id, {})
-        baseline_values = strategy.baselines.model_dump(exclude_none=True)
-        backtest_state = "PENDING_STEP_16" if baseline_values else "NO_BASELINE"
+        analysis = strategy_backtest_analysis(
+            strategy.id,
+            live.get("trades", []),
+            backtest_dir / f"{strategy.id}.csv",
+            recon_file=reconciliation_file,
+            week_seed=week,
+        )
+        backtest_state = analysis["status"]
         strategies.append({
             "strategy_id": strategy.id,
             "portfolio_id": strategy.portfolio_id,
-            "live_metrics": live.get("metrics"),
+            "live_metrics": analysis["live_metrics"],
+            "backtest_analysis": analysis,
             "backtest_state": backtest_state,
             "regime_state": "PENDING_STEP_17",
             "ehi": None,
-            "status": "NO_BASELINE" if not baseline_values else "PENDING_ANALYSIS",
-            "note": "Sin baseline verificable; no se calcula EHI." if not baseline_values else "Los cálculos comparativos llegan en los pasos 16–19.",
+            "status": "NO_BASELINE" if backtest_state == "NO_BASELINE" else backtest_state,
+            "note": "Sin CSV de backtest verificable; se reportan métricas live sin veredicto." if backtest_state == "NO_BASELINE" else "Comparación bootstrap lista; el EHI se calcula en pasos posteriores.",
         })
     timestamp = (now or datetime.now(UTC)).astimezone(UTC).isoformat()
     return {
@@ -84,11 +123,16 @@ def write_artifacts(summary: dict[str, Any], output_root: Path) -> Path:
     (week_dir / "charts").mkdir(exist_ok=True)
     (week_dir / "summary.json").write_text(json.dumps(summary, indent=2, ensure_ascii=False) + "\n")
     (week_dir / "charts" / "README.md").write_text(
-        "Charts are intentionally deferred until the deterministic EHI and market-regime calculations in Steps 16–19 exist.\n"
+        "Per-strategy cone charts are written only when both live trades and valid backtest rows exist. Market-regime charts follow in Step 17.\n"
     )
     backtest = {
         "week": summary["week"],
-        "strategies": [{"strategy_id": row["strategy_id"], "status": row["backtest_state"], "verdict": None} for row in summary["strategies"]],
+        "strategies": [{
+            "strategy_id": row["strategy_id"],
+            "status": row["backtest_state"],
+            "verdict": row["backtest_analysis"].get("windows", {}).get("last_50_trades", {}).get("verdict"),
+            "analysis": row["backtest_analysis"],
+        } for row in summary["strategies"]],
     }
     regime = {
         "week": summary["week"],
@@ -96,6 +140,25 @@ def write_artifacts(summary: dict[str, Any], output_root: Path) -> Path:
     }
     (week_dir / "check_vs_backtest.json").write_text(json.dumps(backtest, indent=2) + "\n")
     (week_dir / "check_regime.json").write_text(json.dumps(regime, indent=2) + "\n")
+    if any(row["backtest_analysis"].get("cone") for row in summary["strategies"]):
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        for row in summary["strategies"]:
+            cone = row["backtest_analysis"].get("cone")
+            if not cone:
+                continue
+            x = cone["trade_index"]
+            fig, ax = plt.subplots(figsize=(9, 4.5))
+            ax.fill_between(x, cone["bands"]["p5"], cone["bands"]["p95"], alpha=0.14, label="P5–P95 backtest")
+            ax.fill_between(x, cone["bands"]["p25"], cone["bands"]["p75"], alpha=0.24, label="P25–P75 backtest")
+            ax.plot(x, cone["bands"]["p50"], label="P50 backtest")
+            ax.plot(x, cone["live_equity_index"], label="Live", linewidth=2)
+            ax.set(title=f"{row['strategy_id']} — equity cone", xlabel="Trade number", ylabel="Equity index (start = 1)")
+            ax.legend()
+            fig.tight_layout()
+            fig.savefig(week_dir / "charts" / f"{row['strategy_id']}_cone.png", dpi=140)
+            plt.close(fig)
     with (week_dir / "ehi.csv").open("w", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=["strategy_id", "ehi", "band", "status"])
         writer.writeheader()
@@ -109,8 +172,8 @@ def write_artifacts(summary: dict[str, Any], output_root: Path) -> Path:
     )
     report_lines = [
         f"# Revisión semanal — {summary['week']}", "",
-        f"Estado: `{summary['status']}`. No hay EHI calculado.", "",
-        "Los baselines permanecen ausentes y la comparación de régimen se implementa en el Paso 17. Este reporte no es una recomendación de trading.", "",
+        f"Estado: `{summary['status']}`. El EHI se añadirá en pasos posteriores.", "",
+        "Las comparaciones live/backtest usan bootstrap por bloques cuando existe CSV y n≥20. El régimen sigue pendiente del Paso 17. Este reporte no es una recomendación de trading.", "",
         "| Estrategia | Estado backtest | Estado régimen | EHI |", "|---|---|---|---:|",
     ]
     report_lines.extend(f"| {row['strategy_id']} | {row['backtest_state']} | {row['regime_state']} | — |" for row in summary["strategies"])
@@ -124,6 +187,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--week", default="auto")
     parser.add_argument("--fixture", type=Path, help="offline fixture for workflow_dispatch validation")
     parser.add_argument("--output-root", type=Path, default=Path("reports/weekly"))
+    parser.add_argument("--backtests-dir", type=Path, default=Path("data/backtests"))
+    parser.add_argument("--reconciliation-file", type=Path)
     args = parser.parse_args(argv)
     try:
         week = iso_week(args.week)
@@ -136,7 +201,12 @@ def main(argv: list[str] | None = None) -> int:
             if not api_url or not token:
                 parser.error("set MONITOR_API_URL and MONITOR_API_TOKEN, or pass --fixture")
             source = _fetch_live(api_url, token)
-        summary = build_summary(week, source)
+        summary = build_summary(
+            week,
+            source,
+            backtest_dir=args.backtests_dir,
+            reconciliation_file=args.reconciliation_file,
+        )
         folder = write_artifacts(summary, args.output_root)
         print(json.dumps({"week": week, "output": str(folder), "status": summary["status"]}))
     except (OSError, ValueError, requests.RequestException) as exc:
