@@ -27,7 +27,7 @@ def test_fixture_weekly_report_is_honest_and_idempotent(tmp_path):
     with (first_dir / "ehi.csv").open() as handle:
         assert len(list(csv.DictReader(handle))) == 5
     assert "no EHI" not in (first_dir / "report.md").read_text()
-    assert "EHI se añadirá" in (first_dir / "report.md").read_text()
+    assert "EHI provisional" in (first_dir / "report.md").read_text()
 
 
 def test_workflow_dispatch_contract_has_manual_fixture_path():

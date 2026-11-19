@@ -105,3 +105,30 @@ def test_writer_renders_cone_chart_when_comparison_is_available(tmp_path):
     }
     folder = write_artifacts(summary, tmp_path)
     assert (folder / "charts" / "MONDAY_BTCJPY_cone.png").is_file()
+
+
+def test_ehi_is_transparent_and_neutralizes_unconfirmed_regime():
+    from reports.weekly.ehi import load_ehi_config, score_ehi
+
+    backtest = {"windows": {"last_50_trades": {
+        "status": "COMPARED", "percentiles": {"expectancy_pct": 80, "profit_factor": 60, "win_rate": 70},
+    }}}
+    regime = {"status": "ADVERSE_HYPOTHESIS", "verdict": "REVIEW", "hypothesis_confirmed": False}
+    result = score_ehi(backtest, regime, load_ehi_config())
+    assert result["ehi"] == 60.0
+    assert result["band"] == "AMBER"
+    assert result["components"]["regime_score"] == 50
+    assert result["component_states"]["regime"] == "HYPOTHESIS_UNCONFIRMED_NEUTRAL"
+
+
+def test_ehi_history_chart_requires_two_points(tmp_path):
+    import json
+    from reports.weekly.ehi import render_ehi_history
+
+    previous = tmp_path / "2026-W46"
+    previous.mkdir()
+    (previous / "summary.json").write_text(json.dumps({"week": "2026-W46", "strategies": [{"strategy_id": "S1", "ehi": 40}]}))
+    rows = [{"strategy_id": "S1", "ehi": 65}, {"strategy_id": "S2", "ehi": None}]
+    charts = render_ehi_history("2026-W47", rows, tmp_path)
+    assert charts == ["S1_ehi.png"]
+    assert (tmp_path / "2026-W47" / "charts" / "S1_ehi.png").is_file()

@@ -14,6 +14,7 @@ import requests
 
 from app.monitoring.strategies import load_registry
 from .backtest import strategy_backtest_analysis
+from .ehi import load_ehi_config, render_ehi_history, score_ehi
 from .regime import build_regime_report, render_regime_heatmaps
 
 UTC = timezone.utc
@@ -102,6 +103,7 @@ def build_summary(
         regime_options["downloader"] = market_downloader
     regime_report = build_regime_report(week, source, **regime_options)
     regime_by_id = {row["strategy_id"]: row for row in regime_report["strategies"]}
+    ehi_config = load_ehi_config()
 
     strategies = []
     for strategy in registry.strategies:
@@ -114,6 +116,7 @@ def build_summary(
             week_seed=week,
         )
         regime_analysis = regime_by_id.get(strategy.id, {"status": "UNCONFIGURED", "verdict": None})
+        ehi = score_ehi(analysis, regime_analysis, ehi_config)
         backtest_state = analysis["status"]
         strategies.append({
             "strategy_id": strategy.id,
@@ -123,9 +126,13 @@ def build_summary(
             "backtest_state": backtest_state,
             "regime_state": regime_analysis["status"],
             "regime_analysis": regime_analysis,
-            "ehi": None,
+            "ehi": ehi["ehi"],
+            "ehi_band": ehi["band"],
+            "ehi_status": ehi["status"],
+            "ehi_components": ehi["components"],
+            "ehi_component_states": ehi["component_states"],
             "status": "NO_BASELINE" if backtest_state == "NO_BASELINE" else backtest_state,
-            "note": "Sin CSV de backtest verificable; se reportan métricas live sin veredicto." if backtest_state == "NO_BASELINE" else "Comparación bootstrap lista; el EHI se calcula en pasos posteriores.",
+            "note": "Sin CSV de backtest verificable; se reportan métricas live sin veredicto." if backtest_state == "NO_BASELINE" else "EHI provisional; ponderaciones y bandas documentadas en config/ehi.yaml.",
         })
     timestamp = (now or datetime.now(UTC)).astimezone(UTC).isoformat()
     return {
@@ -135,7 +142,7 @@ def build_summary(
         "market_data_warning": regime_report["market_data_note"],
         "regime_report": regime_report,
         "strategies": strategies,
-        "worst_ehi": None,
+        "worst_ehi": min((row["ehi"] for row in strategies if row["ehi"] is not None), default=None),
         "status": "PENDING_ANALYSIS",
     }
 
@@ -146,7 +153,7 @@ def write_artifacts(summary: dict[str, Any], output_root: Path) -> Path:
     (week_dir / "charts").mkdir(exist_ok=True)
     (week_dir / "summary.json").write_text(json.dumps(summary, indent=2, ensure_ascii=False) + "\n")
     (week_dir / "charts" / "README.md").write_text(
-        "Cone and market heatmap charts are written when their live, backtest, and reference-market source data are available. EHI charts follow in Step 18.\n"
+        "Charts are rendered only when their required live, backtest, market, or historical EHI data are available. EHI scores are provisional; see report.md and config/ehi.yaml.\n"
     )
     backtest = {
         "week": summary["week"],
@@ -189,11 +196,14 @@ def write_artifacts(summary: dict[str, Any], output_root: Path) -> Path:
             fig.savefig(week_dir / "charts" / f"{row['strategy_id']}_cone.png", dpi=140)
             plt.close(fig)
     render_regime_heatmaps(summary.get("regime_report", {}), week_dir / "charts")
+    history_charts = render_ehi_history(summary["week"], summary["strategies"], output_root)
     with (week_dir / "ehi.csv").open("w", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=["strategy_id", "ehi", "band", "status"])
+        writer = csv.DictWriter(handle, fieldnames=["week", "strategy_id", "ehi", "band", "status", "backtest_component", "regime_component", "backtest_state", "regime_component_state"])
         writer.writeheader()
         for row in summary["strategies"]:
-            writer.writerow({"strategy_id": row["strategy_id"], "ehi": "", "band": "N/A", "status": row["status"]})
+            components = row.get("ehi_components", {})
+            component_states = row.get("ehi_component_states", {})
+            writer.writerow({"week": summary["week"], "strategy_id": row["strategy_id"], "ehi": row.get("ehi") if row.get("ehi") is not None else "", "band": row.get("ehi_band", "N/A"), "status": row.get("ehi_status", "NOT_CALCULATED"), "backtest_component": components.get("backtest_percentile"), "regime_component": components.get("regime_score"), "backtest_state": row["backtest_state"], "regime_component_state": component_states.get("regime", "NOT_CALCULATED")})
     status_lines = "\n".join(f"- [ ] {row['strategy_id']}: backtest `{row['backtest_state']}`, régimen `{row['regime_state']}`, EHI pendiente." for row in summary["strategies"])
     (week_dir / "sop_checklist.md").write_text(
         f"# Checklist SOP semanal — {summary['week']}\n\n"
@@ -202,7 +212,7 @@ def write_artifacts(summary: dict[str, Any], output_root: Path) -> Path:
     )
     report_lines = [
         f"# Revisión semanal — {summary['week']}", "",
-        f"Estado: `{summary['status']}`. El EHI se añadirá en pasos posteriores.", "",
+        f"Estado: `{summary['status']}`. EHI provisional; componentes y bandas documentados en `config/ehi.yaml`.", "",
         f"Las comparaciones live/backtest usan bootstrap por bloques cuando existe CSV y n≥20. {summary.get('market_data_warning', 'Market context unavailable.')} Este reporte no es una recomendación de trading.", "",
         "| Estrategia | Estado backtest | Estado régimen | Lectura actual | EHI |", "|---|---|---|---|---:|",
     ]
