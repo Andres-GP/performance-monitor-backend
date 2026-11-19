@@ -1,0 +1,1 @@
+"""Deterministic weekly monitoring reports."""

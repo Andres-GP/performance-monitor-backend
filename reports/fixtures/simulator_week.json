@@ -1,0 +1,14 @@
+{
+  "description": "Offline workflow fixture based on tools/replay.py scenarios; contains no market or account results.",
+  "scenarios": [
+    "normal",
+    "kill-switch",
+    "ea-down",
+    "late-entry",
+    "short-trade",
+    "hold-out-of-tolerance",
+    "deposit",
+    "duplicate",
+    "unknown-source"
+  ]
+}

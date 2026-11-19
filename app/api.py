@@ -1,25 +1,34 @@
 # api.py
 import json
 import os
+import re
 import jwt
 import requests
-from datetime import datetime, timedelta
+from pathlib import Path
+from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 from jwt.exceptions import PyJWTError
 
 import resend
-from fastapi import FastAPI, Depends, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Depends, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from supabase import create_client, Client
+from starlette.concurrency import run_in_threadpool
 
 from .config import settings
 from .models import StrategyInfo, TradeRecord
+from .monitoring.ingestion import EventValidationError, SupabaseMonitoringRepository, ingest_event
+from .monitoring.alert_lifecycle import SupabaseAlertLifecycleRepository, acknowledge_alert
+from .monitoring.strategies import load_registry
+from .monitoring.activity_rules import normalize_mode
 from .utils.logger import setup_logger
 
 logger = setup_logger(__name__)
 security = HTTPBearer()
+WEEKLY_REPORTS_ROOT = Path(os.getenv("WEEKLY_REPORTS_ROOT", "reports/weekly"))
 
 supabase: Client = create_client(settings.SUPABASE_URL, settings.SUPABASE_SERVICE_ROLE_KEY)
 
@@ -136,8 +145,57 @@ def parse_datetime(dt_str: str) -> datetime:
         dt_str = dt_str[:-1] + '+00:00'
     return datetime.fromisoformat(dt_str)
 
+
+def _monitoring_page(query, *, limit: int, offset: int):
+    response = query.range(offset, offset + limit - 1).execute()
+    data = response.data or []
+    total = getattr(response, "count", None)
+    if not isinstance(total, int):
+        total = None
+    return {"items": data, "limit": limit, "offset": offset, "total": total}
+
+
+def _datetime_filter(value: datetime) -> str:
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc).isoformat()
+
 def create_app() -> FastAPI:
-    app = FastAPI(title="Performance Monitor API", version="2.0")
+    monitoring_registry = load_registry()
+    monitoring_ready = False
+
+    @asynccontextmanager
+    async def lifespan(app):
+        nonlocal monitoring_ready
+        try:
+            monitoring_ready = await run_in_threadpool(
+                SupabaseMonitoringRepository(supabase).sync_registry,
+                monitoring_registry,
+            )
+        except Exception:
+            # The legacy API can run before migration 0001 is applied; normalized ingestion
+            # becomes available once the operator installs the migration.
+            logger.warning("Monitoring registry sync skipped; monitoring schema may be unapplied", exc_info=True)
+        yield
+
+    app = FastAPI(title="Performance Monitor API", version="2.0", lifespan=lifespan)
+
+    def record_monitoring_event(event_type: str, payload: dict):
+        """Keep legacy EA routes working while also recording the normalized event."""
+        if not monitoring_ready:
+            return None
+        try:
+            return ingest_event(
+                event_type,
+                payload,
+                SupabaseMonitoringRepository(supabase),
+                monitoring_registry,
+            )
+        except EventValidationError as exc:
+            logger.warning("Monitoring event rejected after raw capture (%s): %s", event_type, exc)
+        except Exception:
+            logger.exception("Monitoring event persistence failed for %s", event_type)
+        return None
 
     @app.middleware("http")
     async def log_requests(request: Request, call_next):
@@ -155,7 +213,261 @@ def create_app() -> FastAPI:
 
     @app.get("/health")
     async def health():
-        return {"status": "ok"}
+        now = datetime.now(timezone.utc)
+        try:
+            rows = (
+                supabase.table("event_raw").select("received_at")
+                .order("received_at", desc=True).limit(1).execute().data or []
+            )
+            if not isinstance(rows, list):
+                rows = []
+            received_at = rows[0].get("received_at") if rows else None
+            if received_at:
+                parsed = datetime.fromisoformat(received_at.replace("Z", "+00:00"))
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=timezone.utc)
+                age_seconds = max(0, (now - parsed.astimezone(timezone.utc)).total_seconds())
+                ingestion_status = "fresh" if age_seconds <= 300 else "stale"
+            else:
+                age_seconds, ingestion_status = None, "empty"
+            return {
+                "status": "ok",
+                "ingestion": {
+                    "status": ingestion_status,
+                    "last_received_at": received_at,
+                    "age_seconds": age_seconds,
+                    "stale_after_seconds": 300,
+                },
+            }
+        except Exception:
+            logger.warning("Monitoring freshness check unavailable", exc_info=True)
+            return {"status": "ok", "ingestion": {"status": "unavailable"}}
+
+    @app.get("/weekly/reports/latest", dependencies=[Depends(verify_token)])
+    async def latest_weekly_report():
+        """Serve the newest generated weekly summary as a read-only dashboard feed."""
+        candidates = sorted(
+            (path for path in WEEKLY_REPORTS_ROOT.glob("????-W??/summary.json")
+             if re.fullmatch(r"\d{4}-W\d{2}", path.parent.name)),
+            key=lambda path: path.parent.name,
+            reverse=True,
+        )
+        if not candidates:
+            raise HTTPException(status_code=404, detail="No weekly review is available")
+        try:
+            payload = json.loads(candidates[0].read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            logger.exception("Latest weekly summary could not be read")
+            raise HTTPException(status_code=503, detail="Latest weekly review is unreadable") from exc
+        if not isinstance(payload, dict) or payload.get("week") != candidates[0].parent.name:
+            raise HTTPException(status_code=503, detail="Latest weekly review is invalid")
+        return payload
+
+    @app.post("/monitor/events", dependencies=[Depends(verify_token)])
+    async def ingest_monitoring_event(request: Request):
+        try:
+            envelope = await request.json()
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="Invalid JSON body") from exc
+        if not isinstance(envelope, dict):
+            raise HTTPException(status_code=422, detail="Event envelope must be a JSON object")
+        event_type = envelope.get("event_type") or envelope.get("type")
+        payload = envelope.get("payload")
+        if not isinstance(event_type, str) or not isinstance(payload, dict):
+            raise HTTPException(status_code=422, detail="event_type and object payload are required")
+        try:
+            return await run_in_threadpool(
+                ingest_event,
+                event_type,
+                payload,
+                SupabaseMonitoringRepository(supabase),
+                monitoring_registry,
+                idempotency_key=envelope.get("idempotency_key"),
+            )
+        except EventValidationError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except Exception as exc:
+            logger.exception("Monitoring event ingestion failed")
+            raise HTTPException(status_code=503, detail="Monitoring ingestion unavailable") from exc
+
+    @app.get("/portfolios", dependencies=[Depends(verify_token)])
+    async def read_portfolios(
+        limit: int = Query(100, ge=1, le=500),
+        offset: int = Query(0, ge=0),
+    ):
+        portfolios = monitoring_registry.portfolios[offset:offset + limit]
+        items = []
+        for portfolio in portfolios:
+            latest = (
+                supabase.table("daily_stats").select("*")
+                .eq("portfolio_id", portfolio.id).order("ts", desc=True).limit(1).execute().data or []
+            )
+            items.append({**portfolio.model_dump(mode="json"), "metrics": latest[0] if latest else None})
+        return {"items": items, "limit": limit, "offset": offset, "total": len(monitoring_registry.portfolios)}
+
+    @app.get("/portfolios/{portfolio_id}", dependencies=[Depends(verify_token)])
+    async def read_portfolio(portfolio_id: str):
+        portfolio = next((item for item in monitoring_registry.portfolios if item.id == portfolio_id), None)
+        if portfolio is None:
+            raise HTTPException(status_code=404, detail="Portfolio not found")
+        latest = (
+            supabase.table("daily_stats").select("*")
+            .eq("portfolio_id", portfolio_id).order("ts", desc=True).limit(1).execute().data or []
+        )
+        alerts = (
+            supabase.table("alert").select("*").eq("portfolio_id", portfolio_id)
+            .in_("status", ["open", "ack"]).order("last_seen", desc=True).limit(100).execute().data or []
+        )
+        strategies = []
+        for strategy in monitoring_registry.strategies:
+            if strategy.portfolio_id != portfolio_id:
+                continue
+            stats = (
+                supabase.table("daily_stats").select("*")
+                .eq("strategy_id", strategy.id).order("ts", desc=True).limit(1).execute().data or []
+            )
+            strategy_alerts = (
+                supabase.table("alert").select("*").eq("strategy_id", strategy.id)
+                .in_("status", ["open", "ack"]).order("last_seen", desc=True).limit(100).execute().data or []
+            )
+            heartbeat = (
+                supabase.table("heartbeat").select("ts").eq("strategy_id", strategy.id)
+                .order("ts", desc=True).limit(1).execute().data or []
+            )
+            starts = (
+                supabase.table("event_raw").select("payload,received_at").eq("strategy_id", strategy.id)
+                .eq("event_type", "strategy_started").order("received_at", desc=True).limit(1).execute().data or []
+            )
+            start_payload = (starts[0].get("payload") or {}) if starts else {}
+            observed_mode = normalize_mode(start_payload.get("mode") or start_payload.get("data_type"))
+            alerts.extend(strategy_alerts)
+            strategies.append({
+                **strategy.model_dump(mode="json"),
+                "current_mode": observed_mode,
+                "mode_status": "unconfirmed" if observed_mode is None else "matches_expected" if observed_mode == strategy.expected_mode else "mode_mismatch",
+                "mode_observed_at": starts[0].get("received_at") if starts else None,
+                "metrics": stats[0] if stats else None,
+                "alerts": strategy_alerts,
+                "last_heartbeat_at": heartbeat[0].get("ts") if heartbeat else None,
+            })
+        member_ids = [item.id for item in monitoring_registry.strategies if item.portfolio_id == portfolio_id]
+        samples = []
+        if member_ids:
+            samples = (
+                supabase.table("equity_sample").select("strategy_id,ts,equity")
+                .in_("strategy_id", member_ids)
+                .gte("ts", (datetime.now(timezone.utc) - timedelta(days=90)).isoformat())
+                .order("ts", desc=True).range(0, 9999).execute().data or []
+            )
+        # Build a portfolio curve by summing each strategy's latest sample per minute.
+        # Picking one latest sample globally would mislabel a strategy's equity as portfolio equity.
+        by_strategy_minute = {}
+        for sample in samples:
+            ts = datetime.fromisoformat(sample["ts"].replace("Z", "+00:00"))
+            minute = ts.replace(second=0, microsecond=0).isoformat()
+            key = (sample["strategy_id"], minute)
+            if key not in by_strategy_minute or ts >= by_strategy_minute[key]["ts"]:
+                by_strategy_minute[key] = {"ts": ts, "equity": float(sample["equity"])}
+        by_minute = {}
+        for (_, minute), row in by_strategy_minute.items():
+            aggregate = by_minute.setdefault(minute, {"ts": row["ts"], "equity": 0.0})
+            aggregate["equity"] += row["equity"]
+            aggregate["ts"] = max(aggregate["ts"], row["ts"])
+        equity_curve = [
+            {"ts": row["ts"].isoformat(), "equity": row["equity"]}
+            for row in sorted(by_minute.values(), key=lambda value: value["ts"])
+        ]
+        return {
+            "portfolio": portfolio.model_dump(mode="json"),
+            "metrics": latest[0] if latest else None,
+            "strategies": strategies,
+            "alerts": alerts,
+            "equity_curve": equity_curve,
+        }
+
+    @app.get("/strategies/{strategy_id}", dependencies=[Depends(verify_token)])
+    async def read_strategy(strategy_id: str):
+        strategy = next((item for item in monitoring_registry.strategies if item.id == strategy_id), None)
+        if strategy is None:
+            raise HTTPException(status_code=404, detail="Strategy not found")
+        stats = (
+            supabase.table("daily_stats").select("*")
+            .eq("strategy_id", strategy_id).order("ts", desc=True).limit(1).execute().data or []
+        )
+        alerts = (
+            supabase.table("alert").select("*").eq("strategy_id", strategy_id)
+            .in_("status", ["open", "ack"]).order("last_seen", desc=True).limit(100).execute().data or []
+        )
+        return {
+            "strategy": strategy.model_dump(mode="json"),
+            "metrics": stats[0] if stats else None,
+            "alerts": alerts,
+        }
+
+    @app.get("/strategies/{strategy_id}/equity", dependencies=[Depends(verify_token)])
+    async def read_strategy_equity(
+        strategy_id: str,
+        from_: datetime | None = Query(None, alias="from"),
+        to: datetime | None = None,
+        limit: int = Query(500, ge=1, le=2000),
+        offset: int = Query(0, ge=0),
+    ):
+        if not any(item.id == strategy_id for item in monitoring_registry.strategies):
+            raise HTTPException(status_code=404, detail="Strategy not found")
+        if from_ and to and from_ > to:
+            raise HTTPException(status_code=422, detail="from must be earlier than or equal to to")
+        query = supabase.table("equity_sample").select("*", count="exact").eq("strategy_id", strategy_id)
+        if from_:
+            query = query.gte("ts", _datetime_filter(from_))
+        if to:
+            query = query.lte("ts", _datetime_filter(to))
+        query = query.order("ts", desc=True)
+        return _monitoring_page(query, limit=limit, offset=offset)
+
+    @app.get("/portfolios/{portfolio_id}/correlation", dependencies=[Depends(verify_token)])
+    async def read_portfolio_correlation(
+        portfolio_id: str,
+        limit: int = Query(100, ge=1, le=500),
+        offset: int = Query(0, ge=0),
+    ):
+        portfolio = next((item for item in monitoring_registry.portfolios if item.id == portfolio_id), None)
+        if portfolio is None:
+            raise HTTPException(status_code=404, detail="Portfolio not found")
+        members = {item.id for item in monitoring_registry.strategies if item.portfolio_id == portfolio_id}
+        rows = (
+            supabase.table("rule_state").select("scope_id,state,last_evaluated_at")
+            .eq("rule_key", "CORR_HIGH").eq("scope_type", "strategy")
+            .order("last_evaluated_at", desc=True).execute().data or []
+        )
+        pairs = []
+        for row in rows:
+            state = row.get("state") or {}
+            if state.get("strategy_a") in members or state.get("strategy_b") in members:
+                pairs.append({**state, "last_evaluated_at": row.get("last_evaluated_at")})
+        return {
+            "portfolio_id": portfolio_id,
+            "items": pairs[offset:offset + limit],
+            "limit": limit,
+            "offset": offset,
+            "total": len(pairs),
+        }
+
+    @app.post("/alerts/{alert_id}/ack", dependencies=[Depends(verify_token)])
+    async def acknowledge_monitoring_alert(alert_id: int):
+        rows = (
+            supabase.table("alert").select("id,status").eq("id", alert_id).limit(1).execute().data or []
+        )
+        if not rows:
+            raise HTTPException(status_code=404, detail="Alert not found")
+        if rows[0]["status"] == "resolved":
+            raise HTTPException(status_code=409, detail="Resolved alert cannot be acknowledged")
+        if rows[0]["status"] == "open":
+            acknowledge_alert(
+                SupabaseAlertLifecycleRepository(supabase),
+                alert_id,
+                now=datetime.now(timezone.utc),
+            )
+        return {"id": alert_id, "status": "ack"}
 
     # ---- Strategy lifecycle ----
     @app.post("/strategies/start", 
@@ -202,6 +514,7 @@ def create_app() -> FastAPI:
               })
     async def strategy_started(data: dict):
         logger.info(f"Strategy start: {data}")
+        record_monitoring_event("strategy_started", data)
         
         strategy_name = data["name"]
         instrument = data["instrument"]
@@ -347,6 +660,7 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=400, detail="Invalid JSON body")
         
         logger.info(f"✅ Trade received: {data}")
+        record_monitoring_event("trade_closed", data)
         
         strategy_id = data["strategy_id"]
         instrument = data["instrument"]
@@ -493,6 +807,7 @@ def create_app() -> FastAPI:
                 }
             })
     async def receive_alert(alert: dict):
+        record_monitoring_event("health_alert", alert)
         logger.warning(f"Health alert: {alert['problem_type']} - {alert['details']}")
         timestamp_str = alert.get("timestamp")
         if isinstance(timestamp_str, datetime):
@@ -573,6 +888,7 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=400, detail="Invalid JSON body")
         
         strategy_id = data.get("strategy_id")
+        record_monitoring_event("heartbeat", data)
         if not strategy_id:
             raise HTTPException(status_code=400, detail="strategy_id required")
         
@@ -611,6 +927,7 @@ def create_app() -> FastAPI:
                   }
               })
     async def report_capital(data: dict):
+        record_monitoring_event("capital", data)
         account_type = data.get("account_type", "real")
         capital = data.get("capital")
         currency = data.get("currency", "USD")
@@ -731,16 +1048,51 @@ def create_app() -> FastAPI:
         return result.data
 
     @app.get("/strategies/{strategy_id}/trades", dependencies=[Depends(verify_token)])
-    async def get_strategy_trades(strategy_id: str):
-        result = supabase.table("trades").select("*").eq("strategy_id", strategy_id).execute()
-        if not result.data:
-            raise HTTPException(status_code=404, detail="No trades found")
-        return result.data
+    async def get_strategy_trades(
+        strategy_id: str,
+        from_: datetime | None = Query(None, alias="from"),
+        to: datetime | None = None,
+        limit: int = Query(100, ge=1, le=1000),
+        offset: int = Query(0, ge=0),
+    ):
+        if not any(item.id == strategy_id for item in monitoring_registry.strategies):
+            raise HTTPException(status_code=404, detail="Strategy not found")
+        if from_ and to and from_ > to:
+            raise HTTPException(status_code=422, detail="from must be earlier than or equal to to")
+        query = supabase.table("trade").select("*", count="exact").eq("strategy_id", strategy_id)
+        if from_:
+            query = query.gte("exit_time", _datetime_filter(from_))
+        if to:
+            query = query.lte("exit_time", _datetime_filter(to))
+        query = query.order("exit_time", desc=True)
+        return _monitoring_page(query, limit=limit, offset=offset)
 
     @app.get("/alerts", dependencies=[Depends(verify_token)])
-    async def get_alerts(limit: int = 100):
-        result = supabase.table("health_alerts").select("*").order("timestamp", desc=True).limit(limit).execute()
-        return result.data
+    async def get_alerts(
+        limit: int = Query(100, ge=1, le=1000),
+        offset: int = Query(0, ge=0),
+        status: str | None = None,
+        severity: str | None = None,
+        from_: datetime | None = Query(None, alias="from"),
+        to: datetime | None = None,
+    ):
+        if status is not None and status not in {"open", "ack", "resolved"}:
+            raise HTTPException(status_code=422, detail="status must be open, ack, or resolved")
+        if severity is not None and severity not in {"critical", "high", "medium", "info"}:
+            raise HTTPException(status_code=422, detail="invalid severity")
+        if from_ and to and from_ > to:
+            raise HTTPException(status_code=422, detail="from must be earlier than or equal to to")
+        query = supabase.table("alert").select("*", count="exact")
+        if status:
+            query = query.eq("status", status)
+        if severity:
+            query = query.eq("severity", severity)
+        if from_:
+            query = query.gte("first_seen", _datetime_filter(from_))
+        if to:
+            query = query.lte("first_seen", _datetime_filter(to))
+        query = query.order("last_seen", desc=True)
+        return _monitoring_page(query, limit=limit, offset=offset)
 
     # ---- Market regime endpoint ----
     @app.get("/market/regime", dependencies=[Depends(verify_token)])
