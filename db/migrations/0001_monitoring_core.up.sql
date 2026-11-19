@@ -182,3 +182,16 @@ CREATE TABLE IF NOT EXISTS unregistered_source (
 );
 
 CREATE INDEX IF NOT EXISTS unregistered_source_last_seen_idx ON unregistered_source(last_seen);
+
+-- Keep normalized monitoring tables inaccessible to anon/authenticated clients.
+-- The backend connects with the Supabase service_role key, which bypasses RLS.
+ALTER TABLE public.portfolio ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.strategy ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.event_raw ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.trade ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.equity_sample ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.daily_stats ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.heartbeat ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.alert ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.rule_state ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.unregistered_source ENABLE ROW LEVEL SECURITY;
