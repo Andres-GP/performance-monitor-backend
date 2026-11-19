@@ -25,3 +25,5 @@
 - Nota: endpoints de series/alertas admiten paginación y filtros temporales; los datos usan el esquema normalizado de monitoreo.
 - [x] Paso 12 — Dashboard EDA mínimo integrado en el frontend existente: vista de portfolio con selector, alertas por estrategia, heartbeat, curva de equity agregada y correlación; vista de estrategia con métricas, equity, operaciones y alertas.
 - Nota: margen, posiciones, exposición, entradas futuras, bandas bootstrap y referencia OOS se muestran como no disponibles cuando falta fuente normalizada; ampliar en `EDA_BACKLOG.md` y `GAPS.md`.
+- [x] Paso 13 — Simulador HTTP `tools/replay.py` para cinco EAs y escenarios normal, kill, caída, tardanza, short, duración, depósito, duplicado y fuente desconocida; E2E valida alertas esperadas y cero falsos positivos normales.
+- Nota: el replay exige `--confirm-non-production`; trade/equity con timestamp quedan `pending_offset` mientras el offset no esté verificado.
