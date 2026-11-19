@@ -101,6 +101,22 @@ class MemoryRepository:
     def upsert_trade(self, record):
         self.trades.append(deepcopy(record))
 
+    def overlapping_trades(self, strategy_id, entry_time, exit_time):
+        return [
+            deepcopy(trade) for trade in self.trades
+            if trade["strategy_id"] == strategy_id
+            and self._dt(trade["entry_time"]) < exit_time
+            and self._dt(trade["exit_time"]) > entry_time
+        ]
+
+    def recent_order_rejections(self, strategy_id, since):
+        return [
+            deepcopy(raw) for raw in self.raw_events
+            if raw["strategy_id"] == strategy_id
+            and raw["event_type"] == "order_rejected"
+            and self._dt(raw["received_at"]) >= since
+        ]
+
     def insert_heartbeat(self, record):
         self.heartbeats.append(deepcopy(record))
 
@@ -166,6 +182,57 @@ def test_trade_event_is_raw_idempotent_normalized_and_calculated(registry_with_o
     assert repository.trades[0]["pnl_pct_equity"] == 0.2
     assert repository.trades[0]["duration_deviation_minutes"] == 0
     assert repository.raw_events[-1]["ts"] == "2026-11-16T22:00:00+00:00"
+
+
+def test_trade_ingestion_opens_conformity_alerts(registry_with_offset):
+    repository = MemoryRepository()
+    result = ingest_event(
+        "trade_closed",
+        {
+            "strategy_id": "MONDAY_BTCJPY",
+            "symbol": "BTCJPY",
+            "entry_time": "2026-11-02T02:30:00Z",
+            "exit_time": "2026-11-03T05:00:00Z",
+            "volume": 0.2,
+            "entry_price": 100,
+            "exit_price": 101,
+            "profit": 1,
+            "type": "short",
+        },
+        repository,
+        registry_with_offset,
+    )
+    assert result["status"] == "processed"
+    keys = {alert["rule_key"] for alert in repository.alerts}
+    assert {"DIR_VIOLATION", "HOLD_DEVIATION", "ENTRY_OFF_SCHEDULE", "ENTRY_ON_FILTERED_DAY"} <= keys
+
+
+def test_health_alerts_are_renamed_to_canonical_conformity_rules(registry_with_offset):
+    repository = MemoryRepository()
+    result = ingest_event(
+        "health_alert",
+        {"strategy_id": "MONDAY_BTCJPY", "type": "LateExit", "message": "late", "severity": "high"},
+        repository,
+        registry_with_offset,
+    )
+    assert result["status"] == "processed"
+    assert repository.alerts[0]["rule_key"] == "LATE_EXIT_EVENT"
+    assert repository.alerts[0]["severity"] == "high"
+
+
+def test_entry_order_rejection_emits_rejects_rule(registry_with_offset):
+    repository = MemoryRepository()
+    result = ingest_event(
+        "order_rejected",
+        {
+            "strategy_id": "MONDAY_BTCJPY", "context": "EntryBuy", "retcode": 10030,
+            "description": "rejected",
+        },
+        repository,
+        registry_with_offset,
+    )
+    assert result["status"] == "processed"
+    assert {alert["rule_key"] for alert in repository.alerts} == {"ORDER_REJECTED", "REJECTS"}
 
 
 def test_unknown_source_is_saved_for_review_and_opens_high_alert(registry_with_offset):

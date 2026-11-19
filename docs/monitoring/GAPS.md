@@ -5,3 +5,4 @@
 - **Equity**: el reporter revisado no envía eventos `equity`; el endpoint normalizado los acepta cuando la EA los emita.
 - **Posiciones abiertas**: el contrato no publica snapshots de posiciones. No se puede confirmar exposición abierta para discriminar cashflows con total certeza; se marca `cashflow_suspected` cuando no hay un cierre conocido en la ventana.
 - **Otros campos ausentes**: swap separado, spread, slippage y motivo de `SKIP` por slot. Se mantienen como propuestas para el siguiente cambio de EA; no se modifica ningún `.mq5`.
+- **Reglas de conformidad aún condicionadas**: `SIZE_DEVIATION` queda apagada con `contract_size: null`; duración de RSI2 está sin calibrar; `MISSED_SLOT` queda apagada hasta recibir alertas de entrada estructuradas (hoy `alert` es texto libre) y disponer del calendario CSV Gotobi ajustado.

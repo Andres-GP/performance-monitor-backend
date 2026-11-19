@@ -13,3 +13,5 @@
 - Nota: calendarios de cripto, FX y QQQ; `expected_mode` queda en demo según el estado actual del proyecto. Auto-resolución queda para el paso 10.
 - [x] Paso 6 — Reglas B: drawdown diario/total por estrategia y portafolio, KillSwitch, límite duro del broker y `KNOWN_RISK_WEEKLYMOM`.
 - Nota: DD diario se mantiene desactivado mientras el offset de servidor sea `null`; backtest queda desactivado con baselines `null`.
+- [x] Paso 7 — Reglas C: conformidad de trades, rechazos y alertas operativas al ingerir eventos.
+- Nota: tamaño, RSI2 hold y `MISSED_SLOT` quedan condicionados por datos faltantes/calendario; ver `GAPS.md`.

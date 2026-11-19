@@ -9,6 +9,7 @@ from typing import Any, Literal, Protocol
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, ValidationError, field_validator
 
+from .conformity import evaluate_closed_trade
 from .strategies import Portfolio, Strategy, StrategyRegistry
 
 UTC = timezone.utc
@@ -123,6 +124,8 @@ class IngestionRepository(Protocol):
     def has_open_position(self, strategy_id: str, ts: datetime) -> bool: ...
     def upsert_equity_sample(self, record: dict[str, Any]) -> None: ...
     def upsert_trade(self, record: dict[str, Any]) -> None: ...
+    def overlapping_trades(self, strategy_id: str, entry_time: datetime, exit_time: datetime) -> list[dict[str, Any]]: ...
+    def recent_order_rejections(self, strategy_id: str, since: datetime) -> list[dict[str, Any]]: ...
     def insert_heartbeat(self, record: dict[str, Any]) -> None: ...
 
 
@@ -298,6 +301,24 @@ class SupabaseMonitoringRepository:
         self.client.table("trade").upsert(
             record, on_conflict="strategy_id,ticket,exit_time", ignore_duplicates=True
         ).execute()
+
+    def overlapping_trades(self, strategy_id: str, entry_time: datetime, exit_time: datetime) -> list[dict[str, Any]]:
+        response = (
+            self.client.table("trade").select("entry_time,exit_time")
+            .eq("strategy_id", strategy_id)
+            .lt("entry_time", _iso(exit_time))
+            .gt("exit_time", _iso(entry_time))
+            .execute()
+        )
+        return response.data or []
+
+    def recent_order_rejections(self, strategy_id: str, since: datetime) -> list[dict[str, Any]]:
+        response = (
+            self.client.table("event_raw").select("payload,received_at")
+            .eq("strategy_id", strategy_id).eq("event_type", "order_rejected")
+            .gte("received_at", _iso(since)).execute()
+        )
+        return response.data or []
 
     def insert_heartbeat(self, record: dict[str, Any]) -> None:
         self.client.table("heartbeat").insert(record).execute()
@@ -521,7 +542,7 @@ def ingest_event(
             prior_equity = repository.find_previous_equity(strategy.id, entry_time)
             equity = float(prior_equity["equity"]) if prior_equity else None
         deviation = hold_minutes - expected_hold if expected_hold is not None else None
-        repository.upsert_trade({
+        trade_record = {
             "strategy_id": strategy.id,
             "ticket": str(event.ticket) if event.ticket is not None else None,
             "symbol": event.symbol,
@@ -537,7 +558,27 @@ def ingest_event(
             "pnl_pct_equity": (event.profit / equity * 100) if equity and equity > 0 else None,
             "duration_deviation_minutes": deviation,
             "cashflow_suspected": False,
-        })
+        }
+        overlapping = repository.overlapping_trades(strategy.id, entry_time, exit_time)
+        for signal in evaluate_closed_trade(
+            strategy,
+            trade_record,
+            equity_at_open=float(equity) if equity and equity > 0 else None,
+            overlapping_trades=overlapping,
+            server_offset_hours=portfolio.server_utc_offset_hours if portfolio.server_time_to_utc_enabled else None,
+        ):
+            repository.insert_alert({
+                "rule_key": signal["rule_key"],
+                "strategy_id": strategy.id,
+                "portfolio_id": None,
+                "severity": signal["severity"],
+                "status": "open",
+                "first_seen": _iso(exit_time),
+                "last_seen": _iso(exit_time),
+                "count": 1,
+                "context": {**signal["context"], "ticket": trade_record["ticket"]},
+            })
+        repository.upsert_trade(trade_record)
     elif event_type == "equity":
         event: EquityEvent = parsed  # type: ignore[assignment]
         sample_ts = normalized["ts"].replace(second=0, microsecond=0)
@@ -588,7 +629,14 @@ def ingest_event(
     elif event_type in {"health_alert", "order_rejected"}:
         if event_type == "health_alert":
             event: HealthAlertEvent = parsed  # type: ignore[assignment]
-            rule_key = event.alert_type.upper().replace(" ", "_")
+            rule_key = {
+                "LATEEXIT": "LATE_EXIT_EVENT",
+                "LATEENTRY": "LATE_ENTRY_EVENT",
+                "ZEROLOTS": "ZERO_LOTS",
+                "TICKDATAINVALID": "TICK_INVALID",
+                "NOHISTORY": "NO_HISTORY",
+                "CALENDAREXPIRING": "CALENDAR_EXPIRING",
+            }.get(event.alert_type.upper().replace(" ", "").replace("_", ""), event.alert_type.upper().replace(" ", "_"))
             severity = event.severity
             context = {"type": event.alert_type, "message": event.message, "payload": payload}
         else:
@@ -612,6 +660,25 @@ def ingest_event(
             "count": 1,
             "context": context,
         })
+        if event_type == "order_rejected":
+            recent_rejections = repository.recent_order_rejections(strategy.id, received_at - timedelta(hours=24))
+            entry_reject = event.context.lower().startswith("entry")
+            if entry_reject or len(recent_rejections) >= 3:
+                repository.insert_alert({
+                    "rule_key": "REJECTS",
+                    "strategy_id": strategy.id,
+                    "portfolio_id": None,
+                    "severity": "high",
+                    "status": "open",
+                    "first_seen": _iso(event_ts),
+                    "last_seen": _iso(event_ts),
+                    "count": 1,
+                    "context": {
+                        "entry_context_rejected": entry_reject,
+                        "rejections_last_24h": len(recent_rejections),
+                        "last_rejection": context,
+                    },
+                })
 
     repository.set_event_status(raw_id, "processed", source_event_ts)
     return {"status": "processed", "strategy_id": strategy.id}
