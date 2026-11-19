@@ -15,3 +15,5 @@
 - Nota: DD diario se mantiene desactivado mientras el offset de servidor sea `null`; backtest queda desactivado con baselines `null`.
 - [x] Paso 7 — Reglas C: conformidad de trades, rechazos y alertas operativas al ingerir eventos.
 - Nota: tamaño, RSI2 hold y `MISSED_SLOT` quedan condicionados por datos faltantes/calendario; ver `GAPS.md`.
+- [x] Paso 8 — Reglas D: deriva de win rate, profit factor, expectancy, frecuencia, costos y racha frente al backtest.
+- Nota: las reglas no disparan con baselines `null`; `COST_DRIFT` requiere comisión, swap estimado y baseline.

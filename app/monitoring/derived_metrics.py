@@ -256,6 +256,7 @@ def calculate_strategy_metrics(
         **metrics,
         "rolling_20": _rolling_metrics(trades, 20),
         "rolling_50": _rolling_metrics(trades, 50),
+        "_trades": _sorted_trades(trades),
         "_equity_curve": curve,
     }
 

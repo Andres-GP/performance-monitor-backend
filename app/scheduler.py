@@ -7,6 +7,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 from .monitor import PerformanceMonitor
 from .monitoring.activity_rules import run_activity_rules
 from .monitoring.derived_metrics import run_metrics_job, server_daily_close_utc
+from .monitoring.edge_rules import run_edge_rules
 from .monitoring.risk_rules import run_risk_rules
 from .monitoring.strategies import load_registry
 from .utils.logger import setup_logger
@@ -51,6 +52,21 @@ class Scheduler:
                     logger.info("Evaluated risk rules; active signals: %d", len(risk_alerts))
             except Exception:
                 logger.exception("Risk rules job failed")
+            try:
+                edge_result = await asyncio.to_thread(
+                    run_edge_rules,
+                    client,
+                    self.registry,
+                    result,
+                )
+                states = edge_result["states"]
+                insufficient = sum(state["state"] == "INSUFFICIENT_DATA" for state in states.values())
+                logger.info(
+                    "Evaluated edge decay: %d alerts, %d strategies with insufficient data",
+                    len(edge_result["alerts"]), insufficient,
+                )
+            except Exception:
+                logger.exception("Edge decay rules job failed")
         try:
             alerts = await asyncio.to_thread(
                 run_activity_rules,

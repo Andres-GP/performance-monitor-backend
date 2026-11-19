@@ -14,6 +14,8 @@ class Baselines(BaseModel):
     bt_max_dd_pct: float | None = None
     bt_trades_per_month: float | None = None
     bt_avg_hold_min: float | None = None
+    bt_cost_ratio: float | None = Field(default=None, gt=0)
+    bt_max_loss_streak: int | None = Field(default=None, ge=0)
 
 
 class Portfolio(BaseModel):
