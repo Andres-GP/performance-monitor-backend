@@ -22,6 +22,8 @@ strategies:
   - id: MONDAY_BTCJPY
     portfolio_id: P_AXI
     strategy_name_prefix: ALPHACA_MONDAY_
+    expected_mode: demo
+    market_calendar: CRYPTO_24_7
     magic: 290401
     timeframe: H1
     vehicle: BTCJPY CFD
@@ -56,6 +58,8 @@ strategies:
   - id: GOTOBI_USDJPY_AXI
     portfolio_id: P_AXI
     strategy_name_prefix: ALPHACA_GOTOBI_
+    expected_mode: demo
+    market_calendar: FOREX_24_5
     magic: 290402
     timeframe: M5
     vehicle: USDJPY CFD
@@ -92,6 +96,8 @@ strategies:
   - id: WEEKLYMOM_ETHUSD
     portfolio_id: P_AXI
     strategy_name_prefix: ALPHACA_WEEKLYMOM_
+    expected_mode: demo
+    market_calendar: CRYPTO_24_7
     magic: 290403
     timeframe: H1
     vehicle: ETHUSD CFD
@@ -129,6 +135,8 @@ strategies:
   - id: GOTOBI_USDJPY_DWX
     portfolio_id: P_DWX
     strategy_name_prefix: ALPHACA_GOTOBI_DWX_
+    expected_mode: demo
+    market_calendar: FOREX_24_5
     magic: 290412
     timeframe: M5
     vehicle: USDJPY Darwinex
@@ -165,6 +173,8 @@ strategies:
   - id: RSI2_QQQ
     portfolio_id: P_DWX
     strategy_name_prefix: TIS_RSI2_
+    expected_mode: demo
+    market_calendar: US_EQUITY
     magic: 100001
     timeframe: D1
     vehicle: QQQ (Darwinex)

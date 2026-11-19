@@ -80,6 +80,8 @@ class Strategy(BaseModel):
     id: str
     portfolio_id: str
     strategy_name_prefix: str
+    expected_mode: Literal["demo", "live"]
+    market_calendar: Literal["CRYPTO_24_7", "FOREX_24_5", "US_EQUITY"]
     magic: int
     timeframe: str
     vehicle: str

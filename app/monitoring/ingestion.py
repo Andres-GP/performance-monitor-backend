@@ -243,6 +243,7 @@ class SupabaseMonitoringRepository:
         if active:
             self.client.table("alert").update({
                 "count": active[0]["count"] + record.get("count", 1),
+                "severity": record["severity"],
                 "last_seen": record["last_seen"],
                 "context": record["context"],
             }).eq("id", active[0]["id"]).execute()

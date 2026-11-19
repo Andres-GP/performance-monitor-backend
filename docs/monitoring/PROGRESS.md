@@ -9,4 +9,5 @@
 - Nota: timestamps de servidor quedan `received` hasta verificar offset; campos EA faltantes registrados en `GAPS.md`.
 - [x] Paso 4 — Métricas deterministas por estrategia/portafolio y job cada minuto con cierre diario en hora de servidor.
 - Nota: DD diario/fecha solo se persisten con offset verificado; equity actual del EA sigue ausente (ver `GAPS.md`).
-- [ ] Paso 5 — Reglas A: vida y actividad.
+- [x] Paso 5 — Reglas A: vida y actividad (heartbeat/equity stale, EAStopped, inactividad, reinicios y modo esperado).
+- Nota: calendarios de cripto, FX y QQQ; `expected_mode` queda en demo según el estado actual del proyecto. Auto-resolución queda para el paso 10.

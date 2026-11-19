@@ -5,6 +5,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 from .monitor import PerformanceMonitor
+from .monitoring.activity_rules import run_activity_rules
 from .monitoring.derived_metrics import run_metrics_job, server_daily_close_utc
 from .monitoring.strategies import load_registry
 from .utils.logger import setup_logger
@@ -36,6 +37,16 @@ class Scheduler:
             )
         except Exception:
             logger.exception("Derived monitoring metrics job failed")
+        try:
+            alerts = await asyncio.to_thread(
+                run_activity_rules,
+                client,
+                self.registry,
+            )
+            if alerts:
+                logger.info("Evaluated life/activity rules; active signals: %d", len(alerts))
+        except Exception:
+            logger.exception("Life/activity rules job failed")
 
     def start(self):
         # --- 1. Daily performance check (20:00) ---
