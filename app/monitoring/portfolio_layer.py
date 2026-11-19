@@ -207,7 +207,12 @@ def run_portfolio_layer(client, registry, metrics, *, now=None):
         if rows:
             previous[pair_key] = int((rows[0].get("state") or {}).get("consecutive_high", 0))
     result = calculate_portfolio_layer(registry, metrics, now=now, prior_high_counts=previous)
+    pair_details = {
+        "|".join(sorted((pair["strategy_a"], pair["strategy_b"]))): pair
+        for pair in result["correlations"]
+    }
     for pair_key, count in result["high_counts"].items():
+        details = pair_details[pair_key]
         client.table("rule_state").upsert({
             "rule_key": "CORR_HIGH",
             "scope_type": "strategy",
@@ -215,7 +220,15 @@ def run_portfolio_layer(client, registry, metrics, *, now=None):
             "last_evaluated_at": now.isoformat(),
             "consecutive_failures": count,
             "consecutive_passes": 0 if count else 1,
-            "state": {"consecutive_high": count},
+            "state": {
+                "consecutive_high": count,
+                "strategy_a": details["strategy_a"],
+                "strategy_b": details["strategy_b"],
+                "correlation": details["correlation"],
+                "observations": details["observations"],
+                "band": details["band"],
+                "same_edge": details["same_edge"],
+            },
         }, on_conflict="rule_key,scope_type,scope_id").execute()
     for portfolio_id, aggregate in result["portfolios"].items():
         server_date = (metrics.get("portfolios", {}).get(portfolio_id) or {}).get("server_date")

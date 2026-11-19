@@ -4,12 +4,12 @@ import os
 import jwt
 import requests
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 from jwt.exceptions import PyJWTError
 
 import resend
-from fastapi import FastAPI, Depends, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Depends, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -19,6 +19,7 @@ from starlette.concurrency import run_in_threadpool
 from .config import settings
 from .models import StrategyInfo, TradeRecord
 from .monitoring.ingestion import EventValidationError, SupabaseMonitoringRepository, ingest_event
+from .monitoring.alert_lifecycle import SupabaseAlertLifecycleRepository, acknowledge_alert
 from .monitoring.strategies import load_registry
 from .utils.logger import setup_logger
 
@@ -140,6 +141,21 @@ def parse_datetime(dt_str: str) -> datetime:
         dt_str = dt_str[:-1] + '+00:00'
     return datetime.fromisoformat(dt_str)
 
+
+def _monitoring_page(query, *, limit: int, offset: int):
+    response = query.range(offset, offset + limit - 1).execute()
+    data = response.data or []
+    total = getattr(response, "count", None)
+    if not isinstance(total, int):
+        total = None
+    return {"items": data, "limit": limit, "offset": offset, "total": total}
+
+
+def _datetime_filter(value: datetime) -> str:
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc).isoformat()
+
 def create_app() -> FastAPI:
     monitoring_registry = load_registry()
     monitoring_ready = False
@@ -193,7 +209,35 @@ def create_app() -> FastAPI:
 
     @app.get("/health")
     async def health():
-        return {"status": "ok"}
+        now = datetime.now(timezone.utc)
+        try:
+            rows = (
+                supabase.table("event_raw").select("received_at")
+                .order("received_at", desc=True).limit(1).execute().data or []
+            )
+            if not isinstance(rows, list):
+                rows = []
+            received_at = rows[0].get("received_at") if rows else None
+            if received_at:
+                parsed = datetime.fromisoformat(received_at.replace("Z", "+00:00"))
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=timezone.utc)
+                age_seconds = max(0, (now - parsed.astimezone(timezone.utc)).total_seconds())
+                ingestion_status = "fresh" if age_seconds <= 300 else "stale"
+            else:
+                age_seconds, ingestion_status = None, "empty"
+            return {
+                "status": "ok",
+                "ingestion": {
+                    "status": ingestion_status,
+                    "last_received_at": received_at,
+                    "age_seconds": age_seconds,
+                    "stale_after_seconds": 300,
+                },
+            }
+        except Exception:
+            logger.warning("Monitoring freshness check unavailable", exc_info=True)
+            return {"status": "ok", "ingestion": {"status": "unavailable"}}
 
     @app.post("/monitor/events", dependencies=[Depends(verify_token)])
     async def ingest_monitoring_event(request: Request):
@@ -221,6 +265,134 @@ def create_app() -> FastAPI:
         except Exception as exc:
             logger.exception("Monitoring event ingestion failed")
             raise HTTPException(status_code=503, detail="Monitoring ingestion unavailable") from exc
+
+    @app.get("/portfolios", dependencies=[Depends(verify_token)])
+    async def read_portfolios(
+        limit: int = Query(100, ge=1, le=500),
+        offset: int = Query(0, ge=0),
+    ):
+        portfolios = monitoring_registry.portfolios[offset:offset + limit]
+        items = []
+        for portfolio in portfolios:
+            latest = (
+                supabase.table("daily_stats").select("*")
+                .eq("portfolio_id", portfolio.id).order("ts", desc=True).limit(1).execute().data or []
+            )
+            items.append({**portfolio.model_dump(mode="json"), "metrics": latest[0] if latest else None})
+        return {"items": items, "limit": limit, "offset": offset, "total": len(monitoring_registry.portfolios)}
+
+    @app.get("/portfolios/{portfolio_id}", dependencies=[Depends(verify_token)])
+    async def read_portfolio(portfolio_id: str):
+        portfolio = next((item for item in monitoring_registry.portfolios if item.id == portfolio_id), None)
+        if portfolio is None:
+            raise HTTPException(status_code=404, detail="Portfolio not found")
+        latest = (
+            supabase.table("daily_stats").select("*")
+            .eq("portfolio_id", portfolio_id).order("ts", desc=True).limit(1).execute().data or []
+        )
+        alerts = (
+            supabase.table("alert").select("*").eq("portfolio_id", portfolio_id)
+            .in_("status", ["open", "ack"]).order("last_seen", desc=True).limit(100).execute().data or []
+        )
+        strategies = []
+        for strategy in monitoring_registry.strategies:
+            if strategy.portfolio_id != portfolio_id:
+                continue
+            stats = (
+                supabase.table("daily_stats").select("*")
+                .eq("strategy_id", strategy.id).order("ts", desc=True).limit(1).execute().data or []
+            )
+            strategies.append({**strategy.model_dump(mode="json"), "metrics": stats[0] if stats else None})
+        return {
+            "portfolio": portfolio.model_dump(mode="json"),
+            "metrics": latest[0] if latest else None,
+            "strategies": strategies,
+            "alerts": alerts,
+        }
+
+    @app.get("/strategies/{strategy_id}", dependencies=[Depends(verify_token)])
+    async def read_strategy(strategy_id: str):
+        strategy = next((item for item in monitoring_registry.strategies if item.id == strategy_id), None)
+        if strategy is None:
+            raise HTTPException(status_code=404, detail="Strategy not found")
+        stats = (
+            supabase.table("daily_stats").select("*")
+            .eq("strategy_id", strategy_id).order("ts", desc=True).limit(1).execute().data or []
+        )
+        alerts = (
+            supabase.table("alert").select("*").eq("strategy_id", strategy_id)
+            .in_("status", ["open", "ack"]).order("last_seen", desc=True).limit(100).execute().data or []
+        )
+        return {
+            "strategy": strategy.model_dump(mode="json"),
+            "metrics": stats[0] if stats else None,
+            "alerts": alerts,
+        }
+
+    @app.get("/strategies/{strategy_id}/equity", dependencies=[Depends(verify_token)])
+    async def read_strategy_equity(
+        strategy_id: str,
+        from_: datetime | None = Query(None, alias="from"),
+        to: datetime | None = None,
+        limit: int = Query(500, ge=1, le=2000),
+        offset: int = Query(0, ge=0),
+    ):
+        if not any(item.id == strategy_id for item in monitoring_registry.strategies):
+            raise HTTPException(status_code=404, detail="Strategy not found")
+        if from_ and to and from_ > to:
+            raise HTTPException(status_code=422, detail="from must be earlier than or equal to to")
+        query = supabase.table("equity_sample").select("*", count="exact").eq("strategy_id", strategy_id)
+        if from_:
+            query = query.gte("ts", _datetime_filter(from_))
+        if to:
+            query = query.lte("ts", _datetime_filter(to))
+        query = query.order("ts", desc=True)
+        return _monitoring_page(query, limit=limit, offset=offset)
+
+    @app.get("/portfolios/{portfolio_id}/correlation", dependencies=[Depends(verify_token)])
+    async def read_portfolio_correlation(
+        portfolio_id: str,
+        limit: int = Query(100, ge=1, le=500),
+        offset: int = Query(0, ge=0),
+    ):
+        portfolio = next((item for item in monitoring_registry.portfolios if item.id == portfolio_id), None)
+        if portfolio is None:
+            raise HTTPException(status_code=404, detail="Portfolio not found")
+        members = {item.id for item in monitoring_registry.strategies if item.portfolio_id == portfolio_id}
+        rows = (
+            supabase.table("rule_state").select("scope_id,state,last_evaluated_at")
+            .eq("rule_key", "CORR_HIGH").eq("scope_type", "strategy")
+            .order("last_evaluated_at", desc=True).execute().data or []
+        )
+        pairs = []
+        for row in rows:
+            state = row.get("state") or {}
+            if state.get("strategy_a") in members or state.get("strategy_b") in members:
+                pairs.append({**state, "last_evaluated_at": row.get("last_evaluated_at")})
+        return {
+            "portfolio_id": portfolio_id,
+            "items": pairs[offset:offset + limit],
+            "limit": limit,
+            "offset": offset,
+            "total": len(pairs),
+        }
+
+    @app.post("/alerts/{alert_id}/ack", dependencies=[Depends(verify_token)])
+    async def acknowledge_monitoring_alert(alert_id: int):
+        rows = (
+            supabase.table("alert").select("id,status").eq("id", alert_id).limit(1).execute().data or []
+        )
+        if not rows:
+            raise HTTPException(status_code=404, detail="Alert not found")
+        if rows[0]["status"] == "resolved":
+            raise HTTPException(status_code=409, detail="Resolved alert cannot be acknowledged")
+        if rows[0]["status"] == "open":
+            acknowledge_alert(
+                SupabaseAlertLifecycleRepository(supabase),
+                alert_id,
+                now=datetime.now(timezone.utc),
+            )
+        return {"id": alert_id, "status": "ack"}
 
     # ---- Strategy lifecycle ----
     @app.post("/strategies/start", 
@@ -801,16 +973,51 @@ def create_app() -> FastAPI:
         return result.data
 
     @app.get("/strategies/{strategy_id}/trades", dependencies=[Depends(verify_token)])
-    async def get_strategy_trades(strategy_id: str):
-        result = supabase.table("trades").select("*").eq("strategy_id", strategy_id).execute()
-        if not result.data:
-            raise HTTPException(status_code=404, detail="No trades found")
-        return result.data
+    async def get_strategy_trades(
+        strategy_id: str,
+        from_: datetime | None = Query(None, alias="from"),
+        to: datetime | None = None,
+        limit: int = Query(100, ge=1, le=1000),
+        offset: int = Query(0, ge=0),
+    ):
+        if not any(item.id == strategy_id for item in monitoring_registry.strategies):
+            raise HTTPException(status_code=404, detail="Strategy not found")
+        if from_ and to and from_ > to:
+            raise HTTPException(status_code=422, detail="from must be earlier than or equal to to")
+        query = supabase.table("trade").select("*", count="exact").eq("strategy_id", strategy_id)
+        if from_:
+            query = query.gte("exit_time", _datetime_filter(from_))
+        if to:
+            query = query.lte("exit_time", _datetime_filter(to))
+        query = query.order("exit_time", desc=True)
+        return _monitoring_page(query, limit=limit, offset=offset)
 
     @app.get("/alerts", dependencies=[Depends(verify_token)])
-    async def get_alerts(limit: int = 100):
-        result = supabase.table("health_alerts").select("*").order("timestamp", desc=True).limit(limit).execute()
-        return result.data
+    async def get_alerts(
+        limit: int = Query(100, ge=1, le=1000),
+        offset: int = Query(0, ge=0),
+        status: str | None = None,
+        severity: str | None = None,
+        from_: datetime | None = Query(None, alias="from"),
+        to: datetime | None = None,
+    ):
+        if status is not None and status not in {"open", "ack", "resolved"}:
+            raise HTTPException(status_code=422, detail="status must be open, ack, or resolved")
+        if severity is not None and severity not in {"critical", "high", "medium", "info"}:
+            raise HTTPException(status_code=422, detail="invalid severity")
+        if from_ and to and from_ > to:
+            raise HTTPException(status_code=422, detail="from must be earlier than or equal to to")
+        query = supabase.table("alert").select("*", count="exact")
+        if status:
+            query = query.eq("status", status)
+        if severity:
+            query = query.eq("severity", severity)
+        if from_:
+            query = query.gte("first_seen", _datetime_filter(from_))
+        if to:
+            query = query.lte("first_seen", _datetime_filter(to))
+        query = query.order("last_seen", desc=True)
+        return _monitoring_page(query, limit=limit, offset=offset)
 
     # ---- Market regime endpoint ----
     @app.get("/market/regime", dependencies=[Depends(verify_token)])

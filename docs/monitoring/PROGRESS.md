@@ -21,3 +21,5 @@
 - Nota: backlog EDA deduplicado añadido en `EDA_BACKLOG.md` para integrar con pasos 11–12 y 16–19; posiciones/exposición quedan pendientes de datos EA.
 - [x] Paso 10 — Dedupe, cooldowns, resumen diario, ack manual, auto-resolución tras 2 evaluaciones y webhook.
 - Nota: la entrega externa requiere `ALERT_WEBHOOK_URL`; `KILL_ACTIVE` nunca se auto-resuelve y permanece hasta ack.
+- [x] Paso 11 — API autenticada de lectura: portfolios, estrategias, trades, equity, alertas, ack, correlación y frescura de ingesta.
+- Nota: endpoints de series/alertas admiten paginación y filtros temporales; los datos usan el esquema normalizado de monitoreo.

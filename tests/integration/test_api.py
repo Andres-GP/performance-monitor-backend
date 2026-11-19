@@ -6,7 +6,8 @@ from datetime import datetime
 def test_health_endpoint(client):
     response = client.get("/health")
     assert response.status_code == 200
-    assert response.json() == {"status": "ok"}
+    assert response.json()["status"] == "ok"
+    assert response.json()["ingestion"]["status"] == "empty"
 
 def test_start_strategy_new(client, auth_header, sample_strategy_data, mocker):
     # Parcheamos supabase en app.api
@@ -275,26 +276,29 @@ def test_get_strategy_metrics(client, auth_header, mock_supabase):
 
 def test_get_strategy_trades(client, auth_header, mock_supabase):
     """Test obtener trades de una estrategia."""
-    strategy_id = "test_strat_123"
+    strategy_id = "MONDAY_BTCJPY"
     trades_data = [
         {"strategy_id": strategy_id, "instrument": "EURUSD", "pnl": 100},
         {"strategy_id": strategy_id, "instrument": "EURUSD", "pnl": -50}
     ]
-    mock_supabase.table.return_value.select.return_value.eq.return_value.execute.return_value = MagicMock(data=trades_data)
+    query = mock_supabase.table.return_value.select.return_value
+    query.eq.return_value = query
+    query.order.return_value = query
+    query.range.return_value = query
+    query.execute.return_value = MagicMock(data=trades_data, count=2)
     
     response = client.get(f"/strategies/{strategy_id}/trades", headers=auth_header)
     assert response.status_code == 200
     data = response.json()
-    assert len(data) == 2
-    assert data[0]["strategy_id"] == strategy_id
+    assert len(data["items"]) == 2
+    assert data["total"] == 2
+    assert data["items"][0]["strategy_id"] == strategy_id
 
 def test_get_strategy_trades_not_found(client, auth_header, mock_supabase):
     """Test obtener trades de estrategia sin trades."""
-    mock_supabase.table.return_value.select.return_value.eq.return_value.execute.return_value = MagicMock(data=[])
-    
     response = client.get("/strategies/unknown/trades", headers=auth_header)
     assert response.status_code == 404
-    assert "No trades found" in response.text
+    assert "Strategy not found" in response.text
 
 def test_get_alerts(client, auth_header, mock_supabase):
     """Test obtener alertas."""
@@ -302,12 +306,16 @@ def test_get_alerts(client, auth_header, mock_supabase):
         {"id": 1, "strategy_id": "s1", "problem_type": "Frozen order"},
         {"id": 2, "strategy_id": "s2", "problem_type": "Connection lost"}
     ]
-    mock_supabase.table.return_value.select.return_value.order.return_value.limit.return_value.execute.return_value = MagicMock(data=alerts_data)
+    query = mock_supabase.table.return_value.select.return_value
+    query.order.return_value = query
+    query.range.return_value = query
+    query.execute.return_value = MagicMock(data=alerts_data, count=2)
     
     response = client.get("/alerts?limit=2", headers=auth_header)
     assert response.status_code == 200
     data = response.json()
-    assert len(data) == 2
+    assert len(data["items"]) == 2
+    assert data["total"] == 2
 
 def test_get_market_regime(client, auth_header, mock_supabase):
     """Test obtener régimen de mercado."""
