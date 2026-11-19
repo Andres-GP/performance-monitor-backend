@@ -5,4 +5,6 @@
 - Nota: los EAs concretos no están disponibles; offsets de servidor y tamaños de contrato quedan `null` (conversión servidor→UTC desactivada).
 - [x] Paso 2 — Migración reversible con tablas de monitoreo, restricciones e índices de series temporales.
 - Nota: up/down se verifican con SQLite en memoria; la migración aún no se aplicó a Supabase.
-- [ ] Paso 3 — Ingesta robusta.
+- [x] Paso 3 — Ingesta raw primero, validación por tipo, dedupe/reintento, UTC, downsample de equity, trades, heartbeat, cashflow y fuentes desconocidas.
+- Nota: timestamps de servidor quedan `received` hasta verificar offset; campos EA faltantes registrados en `GAPS.md`.
+- [ ] Paso 4 — Métricas derivadas.

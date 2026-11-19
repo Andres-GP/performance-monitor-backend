@@ -3,6 +3,7 @@ import json
 import os
 import jwt
 import requests
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from typing import Optional
 from jwt.exceptions import PyJWTError
@@ -13,9 +14,12 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from supabase import create_client, Client
+from starlette.concurrency import run_in_threadpool
 
 from .config import settings
 from .models import StrategyInfo, TradeRecord
+from .monitoring.ingestion import EventValidationError, SupabaseMonitoringRepository, ingest_event
+from .monitoring.strategies import load_registry
 from .utils.logger import setup_logger
 
 logger = setup_logger(__name__)
@@ -137,7 +141,41 @@ def parse_datetime(dt_str: str) -> datetime:
     return datetime.fromisoformat(dt_str)
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="Performance Monitor API", version="2.0")
+    monitoring_registry = load_registry()
+    monitoring_ready = False
+
+    @asynccontextmanager
+    async def lifespan(app):
+        nonlocal monitoring_ready
+        try:
+            monitoring_ready = await run_in_threadpool(
+                SupabaseMonitoringRepository(supabase).sync_registry,
+                monitoring_registry,
+            )
+        except Exception:
+            # The legacy API can run before migration 0001 is applied; normalized ingestion
+            # becomes available once the operator installs the migration.
+            logger.warning("Monitoring registry sync skipped; monitoring schema may be unapplied", exc_info=True)
+        yield
+
+    app = FastAPI(title="Performance Monitor API", version="2.0", lifespan=lifespan)
+
+    def record_monitoring_event(event_type: str, payload: dict):
+        """Keep legacy EA routes working while also recording the normalized event."""
+        if not monitoring_ready:
+            return None
+        try:
+            return ingest_event(
+                event_type,
+                payload,
+                SupabaseMonitoringRepository(supabase),
+                monitoring_registry,
+            )
+        except EventValidationError as exc:
+            logger.warning("Monitoring event rejected after raw capture (%s): %s", event_type, exc)
+        except Exception:
+            logger.exception("Monitoring event persistence failed for %s", event_type)
+        return None
 
     @app.middleware("http")
     async def log_requests(request: Request, call_next):
@@ -156,6 +194,33 @@ def create_app() -> FastAPI:
     @app.get("/health")
     async def health():
         return {"status": "ok"}
+
+    @app.post("/monitor/events", dependencies=[Depends(verify_token)])
+    async def ingest_monitoring_event(request: Request):
+        try:
+            envelope = await request.json()
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="Invalid JSON body") from exc
+        if not isinstance(envelope, dict):
+            raise HTTPException(status_code=422, detail="Event envelope must be a JSON object")
+        event_type = envelope.get("event_type") or envelope.get("type")
+        payload = envelope.get("payload")
+        if not isinstance(event_type, str) or not isinstance(payload, dict):
+            raise HTTPException(status_code=422, detail="event_type and object payload are required")
+        try:
+            return await run_in_threadpool(
+                ingest_event,
+                event_type,
+                payload,
+                SupabaseMonitoringRepository(supabase),
+                monitoring_registry,
+                idempotency_key=envelope.get("idempotency_key"),
+            )
+        except EventValidationError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except Exception as exc:
+            logger.exception("Monitoring event ingestion failed")
+            raise HTTPException(status_code=503, detail="Monitoring ingestion unavailable") from exc
 
     # ---- Strategy lifecycle ----
     @app.post("/strategies/start", 
@@ -202,6 +267,7 @@ def create_app() -> FastAPI:
               })
     async def strategy_started(data: dict):
         logger.info(f"Strategy start: {data}")
+        record_monitoring_event("strategy_started", data)
         
         strategy_name = data["name"]
         instrument = data["instrument"]
@@ -347,6 +413,7 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=400, detail="Invalid JSON body")
         
         logger.info(f"✅ Trade received: {data}")
+        record_monitoring_event("trade_closed", data)
         
         strategy_id = data["strategy_id"]
         instrument = data["instrument"]
@@ -493,6 +560,7 @@ def create_app() -> FastAPI:
                 }
             })
     async def receive_alert(alert: dict):
+        record_monitoring_event("health_alert", alert)
         logger.warning(f"Health alert: {alert['problem_type']} - {alert['details']}")
         timestamp_str = alert.get("timestamp")
         if isinstance(timestamp_str, datetime):
@@ -573,6 +641,7 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=400, detail="Invalid JSON body")
         
         strategy_id = data.get("strategy_id")
+        record_monitoring_event("heartbeat", data)
         if not strategy_id:
             raise HTTPException(status_code=400, detail="strategy_id required")
         
@@ -611,6 +680,7 @@ def create_app() -> FastAPI:
                   }
               })
     async def report_capital(data: dict):
+        record_monitoring_event("capital", data)
         account_type = data.get("account_type", "real")
         capital = data.get("capital")
         currency = data.get("currency", "USD")

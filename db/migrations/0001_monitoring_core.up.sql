@@ -136,7 +136,7 @@ CREATE TABLE IF NOT EXISTS alert (
     ack_at TIMESTAMPTZ,
     resolved_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    CHECK ((strategy_id IS NOT NULL AND portfolio_id IS NULL) OR (strategy_id IS NULL AND portfolio_id IS NOT NULL))
+    CHECK (strategy_id IS NULL OR portfolio_id IS NULL)
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS alert_active_strategy_rule_idx

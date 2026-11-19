@@ -48,6 +48,9 @@ def test_monitoring_migration_up_creates_tables_indexes_and_constraints():
     connection.execute("INSERT INTO event_raw (idempotency_key, strategy_id, event_type, payload) VALUES ('event-1', 'S', 'heartbeat', '{}')")
     with pytest.raises(sqlite3.IntegrityError):
         connection.execute("INSERT INTO event_raw (idempotency_key, strategy_id, event_type, payload) VALUES ('event-1', 'S', 'heartbeat', '{}')")
+    connection.execute("INSERT INTO alert (rule_key, severity, status, first_seen, last_seen) VALUES ('UNREGISTERED_SOURCE', 'high', 'open', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)")
+    with pytest.raises(sqlite3.IntegrityError):
+        connection.execute("INSERT INTO alert (rule_key, strategy_id, portfolio_id, severity, first_seen, last_seen) VALUES ('BAD_SCOPE', 'S', 'P', 'high', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)")
 
 
 def test_monitoring_migration_down_removes_schema():
