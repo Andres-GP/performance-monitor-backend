@@ -27,7 +27,7 @@ def test_fixture_weekly_report_is_honest_and_idempotent(tmp_path):
     with (first_dir / "ehi.csv").open() as handle:
         assert len(list(csv.DictReader(handle))) == 5
     assert "no EHI" not in (first_dir / "report.md").read_text()
-    assert "EHI provisional" in (first_dir / "report.md").read_text()
+    assert "El EHI es provisional" in (first_dir / "sop_checklist.md").read_text()
 
 
 def test_workflow_dispatch_contract_has_manual_fixture_path():
@@ -36,3 +36,24 @@ def test_workflow_dispatch_contract_has_manual_fixture_path():
     workflow = yaml.load(Path(".github/workflows/weekly_review.yml").read_text(), Loader=yaml.BaseLoader)
     assert workflow["on"]["schedule"][0]["cron"] == "0 6 * * 1"
     assert "workflow_dispatch" in workflow["on"]
+
+
+def test_step19_combines_checks_without_writing_human_decisions(tmp_path):
+    before = Path("reports/decisions.csv").read_bytes()
+    strategy = {
+        "strategy_id": "STRAT", "backtest_state": "COMPARED", "regime_state": "ADVERSE_HYPOTHESIS",
+        "ehi": 25, "ehi_band": "RED", "ehi_status": "PROVISIONAL",
+        "ehi_components": {"backtest_percentile": 0, "regime_score": 50},
+        "ehi_component_states": {"regime": "HYPOTHESIS_UNCONFIRMED_NEUTRAL"},
+        "backtest_analysis": {"windows": {"last_50_trades": {"verdict": "OUTSIDE_BOOTSTRAP_90"}}, "reconciliation": {"status": "RECONCILED", "mismatches": [{"status": "LIVE_ONLY"}]}},
+        "regime_analysis": {"status": "ADVERSE_HYPOTHESIS", "hypothesis_confirmed": False, "current_regime": None},
+    }
+    summary = {"week": "2026-W47", "generated_at": "2026-11-22T00:00:00+00:00", "source": "test", "status": "PENDING_ANALYSIS", "worst_ehi": 25, "market_data_warning": "market note", "strategies": [strategy]}
+    folder = write_artifacts(summary, tmp_path)
+    report = (folder / "report.md").read_text()
+    checklist = (folder / "sop_checklist.md").read_text()
+    checks = json.loads((folder / "check_vs_backtest.json").read_text())
+    assert "REVIEW_REQUIRED" in report and "hipótesis no confirmada" in report
+    assert "TRADE_RECONCILIATION_MISMATCH" in checklist
+    assert checks["review"][0]["state"] == "REVIEW_REQUIRED"
+    assert Path("reports/decisions.csv").read_bytes() == before

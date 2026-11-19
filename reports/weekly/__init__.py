@@ -176,6 +176,39 @@ def write_artifacts(summary: dict[str, Any], output_root: Path) -> Path:
     }
     (week_dir / "check_vs_backtest.json").write_text(json.dumps(backtest, indent=2) + "\n")
     (week_dir / "check_regime.json").write_text(json.dumps(regime, indent=2) + "\n")
+    unavailable_states = {"NO_BASELINE", "INSUFFICIENT_DATA", "INVALID_BASELINE", "MARKET_DATA_UNAVAILABLE", "SIMULATOR_NO_MARKET_DATA", "UNCONFIGURED"}
+    review_rows = []
+    for row in summary["strategies"]:
+        comparison = row.get("backtest_analysis", {}).get("windows", {}).get("last_50_trades", {})
+        reconciliation = row.get("backtest_analysis", {}).get("reconciliation", {})
+        regime_row = row.get("regime_analysis", {})
+        signals = []
+        if comparison.get("verdict") == "OUTSIDE_BOOTSTRAP_90":
+            signals.append("BACKTEST_OUTSIDE_BOOTSTRAP_90")
+        if row.get("ehi_band") == "RED":
+            signals.append("EHI_RED")
+        if regime_row.get("status") == "ADVERSE_HYPOTHESIS":
+            signals.append("ADVERSE_REGIME_HYPOTHESIS" if not regime_row.get("hypothesis_confirmed") else "CONFIRMED_ADVERSE_REGIME")
+        if reconciliation.get("mismatches"):
+            signals.append("TRADE_RECONCILIATION_MISMATCH")
+        limitations = []
+        if row.get("backtest_state") in unavailable_states:
+            limitations.append(row["backtest_state"])
+        if row.get("regime_state") in unavailable_states:
+            limitations.append(row["regime_state"])
+        if row.get("ehi") is None:
+            limitations.append(row.get("ehi_status", "EHI_UNAVAILABLE"))
+        if signals:
+            state = "REVIEW_REQUIRED"
+        elif limitations:
+            state = "NO_VERDICT_DATA_LIMITED"
+        else:
+            state = "READY_FOR_HUMAN_REVIEW"
+        review_rows.append({"strategy_id": row["strategy_id"], "state": state, "signals": signals, "limitations": sorted(set(limitations)), "ehi": row.get("ehi"), "ehi_band": row.get("ehi_band", "N/A"), "backtest_verdict": comparison.get("verdict"), "regime_status": regime_row.get("status"), "regime_hypothesis_confirmed": regime_row.get("hypothesis_confirmed", False), "reconciliation_status": reconciliation.get("status")})
+    summary["review"] = {"status": "REVIEW_REQUIRED" if any(row["state"] == "REVIEW_REQUIRED" for row in review_rows) else "DATA_LIMITED" if any(row["state"] == "NO_VERDICT_DATA_LIMITED" for row in review_rows) else "READY_FOR_HUMAN_REVIEW", "strategies": review_rows}
+    (week_dir / "summary.json").write_text(json.dumps(summary, indent=2, ensure_ascii=False) + "\n")
+    (week_dir / "check_vs_backtest.json").write_text(json.dumps({**backtest, "review": [{"strategy_id": row["strategy_id"], "state": row["state"], "signals": row["signals"], "verdict": row["backtest_verdict"], "ehi": row["ehi"], "ehi_band": row["ehi_band"]} for row in review_rows]}, indent=2) + "\n")
+    (week_dir / "check_regime.json").write_text(json.dumps({**regime, "review": [{"strategy_id": row["strategy_id"], "state": row["state"], "regime_status": row["regime_status"], "hypothesis_confirmed": row["regime_hypothesis_confirmed"], "ehi": row["ehi"], "ehi_band": row["ehi_band"]} for row in review_rows]}, indent=2) + "\n")
     if any(row["backtest_analysis"].get("cone") for row in summary["strategies"]):
         import matplotlib
         matplotlib.use("Agg")
@@ -204,17 +237,29 @@ def write_artifacts(summary: dict[str, Any], output_root: Path) -> Path:
             components = row.get("ehi_components", {})
             component_states = row.get("ehi_component_states", {})
             writer.writerow({"week": summary["week"], "strategy_id": row["strategy_id"], "ehi": row.get("ehi") if row.get("ehi") is not None else "", "band": row.get("ehi_band", "N/A"), "status": row.get("ehi_status", "NOT_CALCULATED"), "backtest_component": components.get("backtest_percentile"), "regime_component": components.get("regime_score"), "backtest_state": row["backtest_state"], "regime_component_state": component_states.get("regime", "NOT_CALCULATED")})
-    status_lines = "\n".join(f"- [ ] {row['strategy_id']}: backtest `{row['backtest_state']}`, régimen `{row['regime_state']}`, EHI pendiente." for row in summary["strategies"])
+    review_by_id = {row["strategy_id"]: row for row in review_rows}
+    status_lines = "\n".join(
+        f"- [ ] **{row['strategy_id']}** — `{review_by_id[row['strategy_id']]['state']}`; backtest `{row['backtest_state']}`; régimen `{row['regime_state']}`; EHI `{row.get('ehi') if row.get('ehi') is not None else 'N/D'}` ({row.get('ehi_band', 'N/A')}). "
+        f"Señales: {', '.join(review_by_id[row['strategy_id']]['signals']) or 'ninguna'}. "
+        f"Limitaciones: {', '.join(review_by_id[row['strategy_id']]['limitations']) or 'ninguna'}"
+        for row in summary["strategies"]
+    )
     (week_dir / "sop_checklist.md").write_text(
         f"# Checklist SOP semanal — {summary['week']}\n\n"
-        "Resultados pendientes de los pasos 16–19; sin veredicto ni EHI hasta disponer de cálculos y fuentes verificables.\n\n"
-        f"{status_lines}\n\n- [ ] Revisión humana y decisión registrada en `reports/decisions.csv`.\n"
+        f"Estado general: `{summary['review']['status']}`. Consulta [informe](report.md), [live vs backtest](check_vs_backtest.json) y [régimen](check_regime.json).\n\n"
+        "El EHI es provisional; las hipótesis no confirmadas no generan una conclusión direccional. Las limitaciones de datos no son veredictos.\n\n"
+        f"{status_lines}\n\n- [ ] Revisar discrepancias EA/motor y costes de ejecución.\n- [ ] Aprobar o descartar señales con contexto y registrar la decisión humana en `reports/decisions.csv` (sin completar automáticamente).\n"
     )
     report_lines = [
         f"# Revisión semanal — {summary['week']}", "",
-        f"Estado: `{summary['status']}`. EHI provisional; componentes y bandas documentados en `config/ehi.yaml`.", "",
+        f"Estado: `{summary['review']['status']}`. Se requiere revisión humana; no es una recomendación de trading.", "",
+        "## Resumen ejecutivo", "",
+        f"- Estrategias revisadas: {len(review_rows)}; alertas de revisión: {sum(row['state'] == 'REVIEW_REQUIRED' for row in review_rows)}; limitadas por datos: {sum(row['state'] == 'NO_VERDICT_DATA_LIMITED' for row in review_rows)}.",
+        f"- EHI más bajo disponible: {summary.get('worst_ehi') if summary.get('worst_ehi') is not None else 'N/D'}; scores provisionales y ponderaciones en `config/ehi.yaml`.",
+        f"- {summary.get('market_data_warning', 'Contexto de mercado no disponible.')}",
+        "- Interpretar bootstrap, régimen, reconciliación y EHI conjuntamente; ninguna regla modifica operaciones.", "",
         f"Las comparaciones live/backtest usan bootstrap por bloques cuando existe CSV y n≥20. {summary.get('market_data_warning', 'Market context unavailable.')} Este reporte no es una recomendación de trading.", "",
-        "| Estrategia | Estado backtest | Estado régimen | Lectura actual | EHI |", "|---|---|---|---|---:|",
+        "| Estrategia | Revisión | Estado backtest | Régimen | Lectura actual | EHI | Señales |", "|---|---|---|---|---|---:|---|",
     ]
     def regime_label(row):
         current = row["regime_analysis"].get("current_regime")
@@ -223,10 +268,10 @@ def write_artifacts(summary: dict[str, Any], output_root: Path) -> Path:
         return f"{current['trend']} {current['direction']}; vol {current['volatility']}; close {current['price']} SMA200"
 
     report_lines.extend(
-        f"| {row['strategy_id']} | {row['backtest_state']} | {row['regime_state']} | {regime_label(row)} | — |"
+        f"| {row['strategy_id']} | {review_by_id[row['strategy_id']]['state']} | {row['backtest_state']} | {row['regime_state']}{' (hipótesis no confirmada)' if row['regime_analysis'].get('status') == 'ADVERSE_HYPOTHESIS' and not row['regime_analysis'].get('hypothesis_confirmed') else ''} | {regime_label(row)} | {row.get('ehi') if row.get('ehi') is not None else 'N/D'} ({row.get('ehi_band', 'N/A')}) | {', '.join(review_by_id[row['strategy_id']]['signals']) or '—'} |"
         for row in summary["strategies"]
     )
-    report_lines.extend(["", summary.get("market_data_warning", "Market context unavailable.")])
+    report_lines.extend(["", "## Límites y referencias", "", "- [Checklist SOP](sop_checklist.md)", "- [Verificación live vs backtest](check_vs_backtest.json)", "- [Verificación de régimen](check_regime.json)", "- Decisiones humanas: `reports/decisions.csv` (registro externo al reporte; no se modifica automáticamente).", "- EHI: promedio ponderado 50/50 de percentiles bootstrap (expectancy, profit factor, win rate) y componente de régimen; bandas provisionalmente rojo <30, ámbar 30–69, verde ≥70. Hipótesis de régimen no confirmadas usan neutral 50.", "- Los datos de referencia de Yahoo Finance pueden diferir del CFD del broker; las hipótesis permanecen sin confirmar hasta su revisión."])
     (week_dir / "report.md").write_text("\n".join(report_lines) + "\n")
     return week_dir
 
