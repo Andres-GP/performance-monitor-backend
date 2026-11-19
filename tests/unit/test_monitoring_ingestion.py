@@ -220,6 +220,21 @@ def test_health_alerts_are_renamed_to_canonical_conformity_rules(registry_with_o
     assert repository.alerts[0]["severity"] == "high"
 
 
+@pytest.mark.parametrize(("alert_type", "expected_rule"), [
+    ("KillSwitch", "KILL_ACTIVE"),
+    ("EAStopped", "EA_STOPPED"),
+])
+def test_health_alert_names_share_lifecycle_rule_keys(registry_with_offset, alert_type, expected_rule):
+    repository = MemoryRepository()
+    ingest_event(
+        "health_alert",
+        {"strategy_id": "MONDAY_BTCJPY", "type": alert_type, "message": "event", "severity": "critical" if alert_type == "KillSwitch" else "medium"},
+        repository,
+        registry_with_offset,
+    )
+    assert repository.alerts[0]["rule_key"] == expected_rule
+
+
 def test_entry_order_rejection_emits_rejects_rule(registry_with_offset):
     repository = MemoryRepository()
     result = ingest_event(

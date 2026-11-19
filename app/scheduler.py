@@ -6,6 +6,7 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 from .monitor import PerformanceMonitor
 from .monitoring.activity_rules import run_activity_rules
+from .monitoring.alert_lifecycle import run_alert_lifecycle
 from .monitoring.derived_metrics import run_metrics_job, server_daily_close_utc
 from .monitoring.edge_rules import run_edge_rules
 from .monitoring.portfolio_layer import run_portfolio_layer
@@ -27,6 +28,8 @@ class Scheduler:
             logger.warning("Derived monitoring metrics skipped: Supabase client unavailable")
             return
         result = None
+        active_alerts = []
+        evaluated_rule_keys = set()
         try:
             result = await asyncio.to_thread(
                 run_metrics_job,
@@ -51,6 +54,14 @@ class Scheduler:
                 )
                 if risk_alerts:
                     logger.info("Evaluated risk rules; active signals: %d", len(risk_alerts))
+                active_alerts.extend(risk_alerts)
+                evaluated_rule_keys.update({
+                    "DD_DAILY_50", "DD_DAILY_70", "DD_DAILY_90",
+                    "DD_TOTAL_50", "DD_TOTAL_70", "DD_TOTAL_90", "KILL_ACTIVE",
+                    "BROKER_HARD_LIMIT", "KNOWN_RISK_WEEKLYMOM",
+                    "PORTFOLIO_DD_DAILY_50", "PORTFOLIO_DD_DAILY_70", "PORTFOLIO_DD_DAILY_90",
+                    "PORTFOLIO_DD_TOTAL_50", "PORTFOLIO_DD_TOTAL_70", "PORTFOLIO_DD_TOTAL_90",
+                })
             except Exception:
                 logger.exception("Risk rules job failed")
             try:
@@ -66,6 +77,10 @@ class Scheduler:
                     "Evaluated edge decay: %d alerts, %d strategies with insufficient data",
                     len(edge_result["alerts"]), insufficient,
                 )
+                active_alerts.extend(edge_result["alerts"])
+                evaluated_rule_keys.update({
+                    "WR_DRIFT", "PF_DRIFT", "EXPECTANCY_NEG", "FREQ_DRIFT", "COST_DRIFT", "LOSS_STREAK",
+                })
             except Exception:
                 logger.exception("Edge decay rules job failed")
             try:
@@ -81,6 +96,8 @@ class Scheduler:
                     len(portfolio_result["correlations"]),
                     len(portfolio_result["alerts"]),
                 )
+                active_alerts.extend(portfolio_result["alerts"])
+                evaluated_rule_keys.update({"CORR_HIGH", "DIVERGENCE_GOTOBI"})
             except Exception:
                 logger.exception("Portfolio analytics job failed")
         try:
@@ -91,8 +108,26 @@ class Scheduler:
             )
             if alerts:
                 logger.info("Evaluated life/activity rules; active signals: %d", len(alerts))
+            active_alerts.extend(alerts)
+            evaluated_rule_keys.update({
+                "HB_STALE", "EQUITY_STALE", "EA_STOPPED", "INACTIVE", "RESTART_LOOP", "MODE_MISMATCH",
+            })
         except Exception:
             logger.exception("Life/activity rules job failed")
+        try:
+            lifecycle = await asyncio.to_thread(
+                run_alert_lifecycle,
+                client,
+                active_signals=active_alerts,
+                evaluated_rule_keys=evaluated_rule_keys,
+            )
+            if lifecycle["resolved_ids"] or lifecycle["notified"]:
+                logger.info(
+                    "Alert lifecycle: %d resolved, %d notifications sent",
+                    len(lifecycle["resolved_ids"]), len(lifecycle["notified"]),
+                )
+        except Exception:
+            logger.exception("Alert lifecycle job failed")
 
     def start(self):
         # --- 1. Daily performance check (20:00) ---

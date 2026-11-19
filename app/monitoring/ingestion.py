@@ -630,6 +630,8 @@ def ingest_event(
         if event_type == "health_alert":
             event: HealthAlertEvent = parsed  # type: ignore[assignment]
             rule_key = {
+                "KILLSWITCH": "KILL_ACTIVE",
+                "EASTOPPED": "EA_STOPPED",
                 "LATEEXIT": "LATE_EXIT_EVENT",
                 "LATEENTRY": "LATE_ENTRY_EVENT",
                 "ZEROLOTS": "ZERO_LOTS",
