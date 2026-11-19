@@ -29,3 +29,5 @@
 - Nota: el replay exige `--confirm-non-production`; trade/equity con timestamp quedan `pending_offset` mientras el offset no esté verificado.
 - [x] Paso 14 — Runbook operativo y `GAPS.md` consolidado con cambios de contrato EA, entorno, baselines y actuación por severidad.
 - Nota: `docs/monitoring/RUNBOOK.md` queda dentro del límite de 80 líneas; se preservan offsets y baselines desconocidos sin inventar valores.
+- [x] Paso 15 — Workflow semanal cron/manual, issue idempotente y runner de artefactos con fixture offline del simulador.
+- Nota: el runner informa `NO_BASELINE`/`PENDING_STEP_17` y no genera EHI ni gráficas ficticias; completar checks y gráficos en los pasos 16–19.

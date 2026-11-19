@@ -1,0 +1,115 @@
+name: Weekly review
+
+on:
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+    inputs:
+      week:
+        description: "ISO week to regenerate (for example 2026-W47); auto uses the current UTC week"
+        required: false
+        default: "auto"
+        type: string
+      fixture:
+        description: "Use the offline simulator fixture instead of the monitoring API"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: weekly-review
+  cancel-in-progress: false
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install report dependencies
+        run: python -m pip install -r requirements-report.txt
+
+      - name: Generate weekly artifacts
+        id: report
+        env:
+          WEEK: ${{ inputs.week || 'auto' }}
+          USE_FIXTURE: ${{ inputs.fixture || false }}
+          MONITOR_API_URL: ${{ secrets.MONITOR_API_URL }}
+          MONITOR_API_TOKEN: ${{ secrets.MONITOR_API_TOKEN }}
+          ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+        run: |
+          if [ "$WEEK" = "auto" ]; then WEEK="$(date -u +%G-W%V)"; fi
+          echo "week=$WEEK" >> "$GITHUB_OUTPUT"
+          if [ "$USE_FIXTURE" = "true" ]; then
+            python -m reports.weekly --week "$WEEK" --fixture reports/fixtures/simulator_week.json
+          else
+            python -m reports.weekly --week "$WEEK"
+          fi
+
+      - name: Commit weekly report artifacts
+        env:
+          WEEK: ${{ steps.report.outputs.week }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "reports/weekly/$WEEK/"
+          if ! git diff --cached --quiet; then
+            git commit -m "weekly report $WEEK"
+            git push
+          fi
+
+      - name: Create or update weekly issue
+        uses: actions/github-script@v7
+        env:
+          WEEK: ${{ steps.report.outputs.week }}
+        with:
+          script: |
+            const fs = require('fs');
+            const week = process.env.WEEK;
+            const folder = `reports/weekly/${week}`;
+            const summary = JSON.parse(fs.readFileSync(`${folder}/summary.json`, 'utf8'));
+            const report = fs.readFileSync(`${folder}/report.md`, 'utf8');
+            const ehi = summary.worst_ehi;
+            const color = ehi == null ? 'amber' : ehi < 30 ? 'red' : ehi < 60 ? 'amber' : 'green';
+            const ref = context.ref.replace('refs/heads/', '');
+            const label = `status:${color}`;
+            try { await github.rest.issues.getLabel({ ...context.repo, name: label }); }
+            catch { await github.rest.issues.createLabel({ ...context.repo, name: label, color: color === 'red' ? 'd73a4a' : color === 'green' ? '0e8a16' : 'fbca04' }); }
+            const title = `Weekly review ${week}`;
+            const body = `${report}\n\nArtifacts: [${folder}](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/tree/${encodeURIComponent(ref)}/${folder})`;
+            const found = await github.rest.issues.listForRepo({ ...context.repo, state: 'open', per_page: 100 });
+            const existing = found.data.find(issue => issue.title === title);
+            if (existing) {
+              await github.rest.issues.update({ ...context.repo, issue_number: existing.number, body });
+              for (const old of existing.labels.filter(x => String(x.name).startsWith('status:'))) await github.rest.issues.removeLabel({ ...context.repo, issue_number: existing.number, name: old.name });
+              await github.rest.issues.addLabels({ ...context.repo, issue_number: existing.number, labels: [label] });
+            } else {
+              await github.rest.issues.create({ ...context.repo, title, body, labels: [label] });
+            }
+
+      - name: Create failure issue
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const title = 'Weekly review FAILED';
+            const body = `The weekly review failed for run ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}. Inspect the failed step and workflow logs.`;
+            const found = await github.rest.issues.listForRepo({ ...context.repo, state: 'open', per_page: 100 });
+            const existing = found.data.find(issue => issue.title === title);
+            if (existing) await github.rest.issues.update({ ...context.repo, issue_number: existing.number, body });
+            else await github.rest.issues.create({ ...context.repo, title, body });
