@@ -114,3 +114,29 @@ def test_alert_filters_ack_and_correlation_read(client, auth_header, monitoring_
 def test_read_api_requires_authentication(client):
     assert client.get("/portfolios").status_code == 403
     assert client.get("/strategies/MONDAY_BTCJPY").status_code == 403
+
+
+def test_latest_weekly_report_is_authenticated_and_selects_latest(tmp_path, client, auth_header, monkeypatch):
+    import app.api
+
+    monkeypatch.setattr(app.api, "WEEKLY_REPORTS_ROOT", tmp_path)
+    older = tmp_path / "2026-W46"
+    latest = tmp_path / "2026-W47"
+    older.mkdir()
+    latest.mkdir()
+    (older / "summary.json").write_text('{"week":"2026-W46","strategies":[]}')
+    (latest / "summary.json").write_text('{"week":"2026-W47","strategies":[{"strategy_id":"S1","ehi":71}]}')
+
+    assert client.get("/weekly/reports/latest").status_code == 403
+    response = client.get("/weekly/reports/latest", headers=auth_header)
+    assert response.status_code == 200
+    assert response.json()["week"] == "2026-W47"
+    assert response.json()["strategies"][0]["ehi"] == 71
+
+
+def test_latest_weekly_report_returns_404_when_missing(tmp_path, client, auth_header, monkeypatch):
+    import app.api
+
+    monkeypatch.setattr(app.api, "WEEKLY_REPORTS_ROOT", tmp_path)
+    response = client.get("/weekly/reports/latest", headers=auth_header)
+    assert response.status_code == 404

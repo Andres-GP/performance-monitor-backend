@@ -1,8 +1,10 @@
 # api.py
 import json
 import os
+import re
 import jwt
 import requests
+from pathlib import Path
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -25,6 +27,7 @@ from .utils.logger import setup_logger
 
 logger = setup_logger(__name__)
 security = HTTPBearer()
+WEEKLY_REPORTS_ROOT = Path(os.getenv("WEEKLY_REPORTS_ROOT", "reports/weekly"))
 
 supabase: Client = create_client(settings.SUPABASE_URL, settings.SUPABASE_SERVICE_ROLE_KEY)
 
@@ -238,6 +241,26 @@ def create_app() -> FastAPI:
         except Exception:
             logger.warning("Monitoring freshness check unavailable", exc_info=True)
             return {"status": "ok", "ingestion": {"status": "unavailable"}}
+
+    @app.get("/weekly/reports/latest", dependencies=[Depends(verify_token)])
+    async def latest_weekly_report():
+        """Serve the newest generated weekly summary as a read-only dashboard feed."""
+        candidates = sorted(
+            (path for path in WEEKLY_REPORTS_ROOT.glob("????-W??/summary.json")
+             if re.fullmatch(r"\d{4}-W\d{2}", path.parent.name)),
+            key=lambda path: path.parent.name,
+            reverse=True,
+        )
+        if not candidates:
+            raise HTTPException(status_code=404, detail="No weekly review is available")
+        try:
+            payload = json.loads(candidates[0].read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            logger.exception("Latest weekly summary could not be read")
+            raise HTTPException(status_code=503, detail="Latest weekly review is unreadable") from exc
+        if not isinstance(payload, dict) or payload.get("week") != candidates[0].parent.name:
+            raise HTTPException(status_code=503, detail="Latest weekly review is invalid")
+        return payload
 
     @app.post("/monitor/events", dependencies=[Depends(verify_token)])
     async def ingest_monitoring_event(request: Request):
