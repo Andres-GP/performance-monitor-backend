@@ -1,0 +1,14 @@
+version: 1
+weights:
+  backtest: 0.5
+  regime: 0.5
+bands:
+  red_below: 30
+  green_from: 70
+backtest_window: last_50_trades
+backtest_metrics:
+  - expectancy_pct
+  - profit_factor
+  - win_rate
+unconfirmed_regime_score: 50
+informational_regime_score: 50

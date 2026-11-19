@@ -1,0 +1,37 @@
+# Progreso del sistema de monitoreo
+
+- [x] Paso 0 — Reconocimiento. Stack y contrato actual documentados en `RECON.md`; reporter consultado desde `HEAD` porque está borrado localmente.
+- [x] Paso 1 — Registro YAML completo, loader Pydantic, matching por prefijo, límites efectivos y baselines inactivos si son `null`.
+- Nota: los EAs concretos no están disponibles; offsets de servidor y tamaños de contrato quedan `null` (conversión servidor→UTC desactivada).
+- [x] Paso 2 — Migración reversible con tablas de monitoreo, restricciones e índices de series temporales.
+- Nota: up/down se verifican con SQLite en memoria; la migración aún no se aplicó a Supabase.
+- [x] Paso 3 — Ingesta raw primero, validación por tipo, dedupe/reintento, UTC, downsample de equity, trades, heartbeat, cashflow y fuentes desconocidas.
+- Nota: timestamps de servidor quedan `received` hasta verificar offset; campos EA faltantes registrados en `GAPS.md`.
+- [x] Paso 4 — Métricas deterministas por estrategia/portafolio y job cada minuto con cierre diario en hora de servidor.
+- Nota: DD diario/fecha solo se persisten con offset verificado; equity actual del EA sigue ausente (ver `GAPS.md`).
+- [x] Paso 5 — Reglas A: vida y actividad (heartbeat/equity stale, EAStopped, inactividad, reinicios y modo esperado).
+- Nota: calendarios de cripto, FX y QQQ; `expected_mode` queda en demo según el estado actual del proyecto. Auto-resolución queda para el paso 10.
+- [x] Paso 6 — Reglas B: drawdown diario/total por estrategia y portafolio, KillSwitch, límite duro del broker y `KNOWN_RISK_WEEKLYMOM`.
+- Nota: DD diario se mantiene desactivado mientras el offset de servidor sea `null`; backtest queda desactivado con baselines `null`.
+- [x] Paso 7 — Reglas C: conformidad de trades, rechazos y alertas operativas al ingerir eventos.
+- Nota: tamaño, RSI2 hold y `MISSED_SLOT` quedan condicionados por datos faltantes/calendario; ver `GAPS.md`.
+- [x] Paso 8 — Reglas D: deriva de win rate, profit factor, expectancy, frecuencia, costos y racha frente al backtest.
+- Nota: las reglas no disparan con baselines `null`; `COST_DRIFT` requiere comisión, swap estimado y baseline.
+- [x] Paso 9 — Capa de portafolio: P&L realizado por período, contribución por estrategia, curvas, correlación rolling y divergencia Gotobi.
+- Nota: backlog EDA deduplicado añadido en `EDA_BACKLOG.md` para integrar con pasos 11–12 y 16–19; posiciones/exposición quedan pendientes de datos EA.
+- [x] Paso 10 — Dedupe, cooldowns, resumen diario, ack manual, auto-resolución tras 2 evaluaciones y webhook.
+- Nota: la entrega externa requiere `ALERT_WEBHOOK_URL`; `KILL_ACTIVE` nunca se auto-resuelve y permanece hasta ack.
+- [x] Paso 11 — API autenticada de lectura: portfolios, estrategias, trades, equity, alertas, ack, correlación y frescura de ingesta.
+- Nota: endpoints de series/alertas admiten paginación y filtros temporales; los datos usan el esquema normalizado de monitoreo.
+- [x] Paso 12 — Dashboard EDA mínimo integrado en el frontend existente: vista de portfolio con selector, alertas por estrategia, heartbeat, curva de equity agregada y correlación; vista de estrategia con métricas, equity, operaciones y alertas.
+- Nota: margen, posiciones, exposición, entradas futuras, bandas bootstrap y referencia OOS se muestran como no disponibles cuando falta fuente normalizada; ampliar en `EDA_BACKLOG.md` y `GAPS.md`.
+- [x] Paso 13 — Simulador HTTP `tools/replay.py` para cinco EAs y escenarios normal, kill, caída, tardanza, short, duración, depósito, duplicado y fuente desconocida; E2E valida alertas esperadas y cero falsos positivos normales.
+- Nota: el replay exige `--confirm-non-production`; trade/equity con timestamp quedan `pending_offset` mientras el offset no esté verificado.
+- [x] Paso 14 — Runbook operativo y `GAPS.md` consolidado con cambios de contrato EA, entorno, baselines y actuación por severidad.
+- Nota: `docs/monitoring/RUNBOOK.md` queda dentro del límite de 80 líneas; se preservan offsets y baselines desconocidos sin inventar valores.
+- [x] Paso 15 — Workflow semanal cron/manual, issue idempotente y runner de artefactos con fixture offline del simulador.
+- Nota: el runner informa estados sin baseline/régimen y no genera EHI ficticio; conos del Paso 16 requieren CSV de backtest y el EHI queda para pasos posteriores.
+- [x] Paso 16 — Métricas live por ventanas, bootstrap circular por bloques (10 000, bloque 3), cono P5–P95, conciliación opcional y `check_vs_backtest.json`.
+- Nota: no hay CSVs de backtest ni logs del motor en el repo; se conserva `NO_BASELINE`, con métricas live y sin veredicto donde corresponda.
+- [x] Paso 17 — Régimen de referencia Yahoo por instrumento (ATR%, Kaufman ER, SMA200), ocho semanas, episodios >5%, heatmaps live/activo y backtest condicional.
+- Nota: hipótesis de régimen siguen `hypothesis_confirmed: false`; precios son referencia, no CFD. El prompt adjunto se corta tras el inicio del cálculo condicional.
