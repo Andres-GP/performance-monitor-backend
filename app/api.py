@@ -302,12 +302,54 @@ def create_app() -> FastAPI:
                 supabase.table("daily_stats").select("*")
                 .eq("strategy_id", strategy.id).order("ts", desc=True).limit(1).execute().data or []
             )
-            strategies.append({**strategy.model_dump(mode="json"), "metrics": stats[0] if stats else None})
+            strategy_alerts = (
+                supabase.table("alert").select("*").eq("strategy_id", strategy.id)
+                .in_("status", ["open", "ack"]).order("last_seen", desc=True).limit(100).execute().data or []
+            )
+            heartbeat = (
+                supabase.table("heartbeat").select("ts").eq("strategy_id", strategy.id)
+                .order("ts", desc=True).limit(1).execute().data or []
+            )
+            alerts.extend(strategy_alerts)
+            strategies.append({
+                **strategy.model_dump(mode="json"),
+                "metrics": stats[0] if stats else None,
+                "alerts": strategy_alerts,
+                "last_heartbeat_at": heartbeat[0].get("ts") if heartbeat else None,
+            })
+        member_ids = [item.id for item in monitoring_registry.strategies if item.portfolio_id == portfolio_id]
+        samples = []
+        if member_ids:
+            samples = (
+                supabase.table("equity_sample").select("strategy_id,ts,equity")
+                .in_("strategy_id", member_ids)
+                .gte("ts", (datetime.now(timezone.utc) - timedelta(days=90)).isoformat())
+                .order("ts", desc=True).range(0, 9999).execute().data or []
+            )
+        # Build a portfolio curve by summing each strategy's latest sample per minute.
+        # Picking one latest sample globally would mislabel a strategy's equity as portfolio equity.
+        by_strategy_minute = {}
+        for sample in samples:
+            ts = datetime.fromisoformat(sample["ts"].replace("Z", "+00:00"))
+            minute = ts.replace(second=0, microsecond=0).isoformat()
+            key = (sample["strategy_id"], minute)
+            if key not in by_strategy_minute or ts >= by_strategy_minute[key]["ts"]:
+                by_strategy_minute[key] = {"ts": ts, "equity": float(sample["equity"])}
+        by_minute = {}
+        for (_, minute), row in by_strategy_minute.items():
+            aggregate = by_minute.setdefault(minute, {"ts": row["ts"], "equity": 0.0})
+            aggregate["equity"] += row["equity"]
+            aggregate["ts"] = max(aggregate["ts"], row["ts"])
+        equity_curve = [
+            {"ts": row["ts"].isoformat(), "equity": row["equity"]}
+            for row in sorted(by_minute.values(), key=lambda value: value["ts"])
+        ]
         return {
             "portfolio": portfolio.model_dump(mode="json"),
             "metrics": latest[0] if latest else None,
             "strategies": strategies,
             "alerts": alerts,
+            "equity_curve": equity_curve,
         }
 
     @app.get("/strategies/{strategy_id}", dependencies=[Depends(verify_token)])

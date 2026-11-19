@@ -23,3 +23,5 @@
 - Nota: la entrega externa requiere `ALERT_WEBHOOK_URL`; `KILL_ACTIVE` nunca se auto-resuelve y permanece hasta ack.
 - [x] Paso 11 — API autenticada de lectura: portfolios, estrategias, trades, equity, alertas, ack, correlación y frescura de ingesta.
 - Nota: endpoints de series/alertas admiten paginación y filtros temporales; los datos usan el esquema normalizado de monitoreo.
+- [x] Paso 12 — Dashboard EDA mínimo integrado en el frontend existente: vista de portfolio con selector, alertas por estrategia, heartbeat, curva de equity agregada y correlación; vista de estrategia con métricas, equity, operaciones y alertas.
+- Nota: margen, posiciones, exposición, entradas futuras, bandas bootstrap y referencia OOS se muestran como no disponibles cuando falta fuente normalizada; ampliar en `EDA_BACKLOG.md` y `GAPS.md`.

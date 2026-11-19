@@ -27,6 +27,7 @@ def monitoring_tables(mock_supabase):
         "alert": _table([]),
         "trade": _table([]),
         "equity_sample": _table([]),
+        "heartbeat": _table([]),
         "rule_state": _table([]),
         "event_raw": _table([]),
     }
@@ -38,6 +39,12 @@ def monitoring_tables(mock_supabase):
 
 def test_portfolio_list_and_detail_use_registered_portfolio_and_metrics(client, auth_header, monitoring_tables):
     monitoring_tables["daily_stats"] = _table([{"equity": 12000, "total_dd_pct": 1.2}])
+    monitoring_tables["heartbeat"] = _table([{"ts": "2026-11-19T19:59:00+00:00"}])
+    monitoring_tables["equity_sample"] = _table([{
+        "strategy_id": "MONDAY_BTCJPY", "ts": "2026-11-19T19:59:40+00:00", "equity": 12000,
+    }, {
+        "strategy_id": "WEEKLYMOM_ETHUSD", "ts": "2026-11-19T19:59:20+00:00", "equity": 8000,
+    }])
     response = client.get("/portfolios?limit=1&offset=0", headers=auth_header)
     assert response.status_code == 200
     data = response.json()
@@ -49,6 +56,8 @@ def test_portfolio_list_and_detail_use_registered_portfolio_and_metrics(client, 
     assert response.json()["portfolio"]["id"] == "P_AXI"
     assert response.json()["metrics"]["equity"] == 12000
     assert len(response.json()["strategies"]) == 3
+    assert response.json()["strategies"][0]["last_heartbeat_at"] == "2026-11-19T19:59:00+00:00"
+    assert response.json()["equity_curve"][0]["equity"] == 20000
 
 
 def test_strategy_detail_and_paginated_date_filtered_trades(client, auth_header, monitoring_tables):

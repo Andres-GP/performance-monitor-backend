@@ -37,6 +37,6 @@ Este backlog amplía los pasos ya previstos, sin crear una segunda implementaci�
 
 1. Completar portafolio y correlación del paso 9; anotar explícitamente las métricas indisponibles.
 2. Exponer las fuentes canónicas en la API del paso 11.
-3. Incorporar las vistas EDA y gráficos livianos en el dashboard del paso 12.
+3. Incorporar las vistas EDA y gráficos livianos en el dashboard del paso 12. **Hecho parcialmente en Paso 12**: selector de portfolio, equity agregado, alertas/heartbeat por estrategia, correlación disponible, métricas live y trades recientes. Los demás análisis quedan para pasos 16–19 o hasta disponer de sus fuentes.
 4. Reutilizar datos, cálculos y gráficos de los pasos 16–19; añadir solamente los campos/análisis adicionales de este documento.
 5. Registrar nuevas carencias de contrato en `GAPS.md` y habilitar cada análisis solo cuando los datos necesarios sean verificables.
