@@ -93,6 +93,8 @@ CREATE TABLE IF NOT EXISTS daily_stats (
     ts TIMESTAMPTZ NOT NULL,
     server_date DATE NOT NULL,
     equity NUMERIC(24, 10),
+    performance_equity NUMERIC(24, 10),
+    peak_equity NUMERIC(24, 10),
     pnl NUMERIC(24, 10),
     daily_dd_pct NUMERIC(16, 8),
     total_dd_pct NUMERIC(16, 8),
@@ -104,6 +106,8 @@ CREATE TABLE IF NOT EXISTS daily_stats (
     avg_hold_minutes NUMERIC(16, 4),
     current_loss_streak INTEGER NOT NULL DEFAULT 0 CHECK (current_loss_streak >= 0),
     max_loss_streak INTEGER NOT NULL DEFAULT 0 CHECK (max_loss_streak >= 0),
+    rolling_20 JSONB NOT NULL DEFAULT '{}',
+    rolling_50 JSONB NOT NULL DEFAULT '{}',
     CHECK ((strategy_id IS NOT NULL AND portfolio_id IS NULL) OR (strategy_id IS NULL AND portfolio_id IS NOT NULL)),
     UNIQUE (strategy_id, server_date),
     UNIQUE (portfolio_id, server_date)

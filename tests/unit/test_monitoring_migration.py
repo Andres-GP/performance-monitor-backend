@@ -42,6 +42,10 @@ def test_monitoring_migration_up_creates_tables_indexes_and_constraints():
     assert "event_raw_strategy_ts_idx" in indexes
     assert "heartbeat_strategy_ts_idx" in indexes
     assert "alert_active_strategy_rule_idx" in indexes
+    daily_stats_columns = {
+        row[1] for row in connection.execute("PRAGMA table_info(daily_stats)")
+    }
+    assert {"performance_equity", "peak_equity", "rolling_20", "rolling_50"} <= daily_stats_columns
 
     connection.execute("INSERT INTO portfolio (id, broker, daily_dd_limit_pct, total_dd_limit_pct) VALUES ('P', 'Broker', 3, 8)")
     connection.execute("INSERT INTO strategy (id, portfolio_id, strategy_name_prefix, magic, timeframe, vehicle, direction) VALUES ('S', 'P', 'S_', 1, 'H1', 'CFD', 'long')")

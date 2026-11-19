@@ -7,4 +7,6 @@
 - Nota: up/down se verifican con SQLite en memoria; la migración aún no se aplicó a Supabase.
 - [x] Paso 3 — Ingesta raw primero, validación por tipo, dedupe/reintento, UTC, downsample de equity, trades, heartbeat, cashflow y fuentes desconocidas.
 - Nota: timestamps de servidor quedan `received` hasta verificar offset; campos EA faltantes registrados en `GAPS.md`.
-- [ ] Paso 4 — Métricas derivadas.
+- [x] Paso 4 — Métricas deterministas por estrategia/portafolio y job cada minuto con cierre diario en hora de servidor.
+- Nota: DD diario/fecha solo se persisten con offset verificado; equity actual del EA sigue ausente (ver `GAPS.md`).
+- [ ] Paso 5 — Reglas A: vida y actividad.
