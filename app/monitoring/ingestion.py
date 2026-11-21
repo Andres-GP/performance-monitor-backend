@@ -233,10 +233,12 @@ class SupabaseMonitoringRepository:
             if existing.data:
                 row = existing.data[0]
                 return False, row.get("id"), row.get("ingest_status")
-        query = self.client.table("event_raw").upsert(
+        # supabase-py 1.2.0 returns a SyncQueryRequestBuilder from upsert();
+        # unlike newer PostgREST clients, it does not support chaining select().
+        response = self.client.table("event_raw").upsert(
             record, on_conflict="idempotency_key", ignore_duplicates=True
-        ).select("id")
-        data = query.execute().data or []
+        ).execute()
+        data = getattr(response, "data", None) or []
         if data:
             return True, data[0].get("id"), "received"
         if key:
