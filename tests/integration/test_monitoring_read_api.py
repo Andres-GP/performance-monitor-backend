@@ -2,6 +2,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+from app.api import enrich_execution_events
 
 
 def _table(data=None, count=None, *, ack_row=None):
@@ -62,6 +63,28 @@ def test_portfolio_list_and_detail_use_registered_portfolio_and_metrics(client, 
     assert response.json()["strategies"][0]["expected_mode"] == "demo"
     assert response.json()["strategies"][0]["current_mode"] == "live"
     assert response.json()["strategies"][0]["mode_status"] == "mode_mismatch"
+
+
+def test_execution_event_enrichment_calculates_adverse_slippage_and_latency():
+    page = {"items": [{
+        "event_type": "execution_update",
+        "payload": {
+            "signal_id": "S-1", "status": "filled", "fill_price": 100.15,
+            "timestamp": "2026-11-19T10:00:01.500Z",
+        },
+    }]}
+    context = [{
+        "event_type": "signal_intent",
+        "payload": {
+            "signal_id": "S-1", "direction": "long", "reference_price": 100,
+            "spread_points": 14, "timestamp": "2026-11-19T10:00:00Z",
+        },
+    }]
+    enriched = enrich_execution_events(page, context)["items"][0]["payload"]
+    assert enriched["slippage_price"] == pytest.approx(0.15)
+    assert enriched["slippage_bps"] == pytest.approx(15)
+    assert enriched["spread_points"] == 14
+    assert enriched["signal_to_fill_seconds"] == pytest.approx(1.5)
 
 
 def test_strategy_detail_and_paginated_date_filtered_trades(client, auth_header, monitoring_tables):

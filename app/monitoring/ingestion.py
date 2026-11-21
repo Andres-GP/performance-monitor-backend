@@ -97,6 +97,9 @@ class SignalIntentEvent(EventPayload):
     direction: Literal["long", "short"]
     reference_price: float = Field(gt=0)
     volume: float = Field(gt=0)
+    bid_price: float | None = Field(default=None, gt=0)
+    ask_price: float | None = Field(default=None, gt=0)
+    spread_points: float | None = Field(default=None, ge=0)
     timestamp: datetime
 
 

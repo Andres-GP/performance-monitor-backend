@@ -169,6 +169,42 @@ def _monitoring_page(query, *, limit: int, offset: int):
     return {"items": data, "limit": limit, "offset": offset, "total": total}
 
 
+def enrich_execution_events(page: dict, context_rows: list[dict]) -> dict:
+    """Join signal references to fills and calculate observed execution slippage."""
+    intents = {
+        (row.get("payload") or {}).get("signal_id"): row.get("payload") or {}
+        for row in context_rows
+        if row.get("event_type") == "signal_intent" and (row.get("payload") or {}).get("signal_id")
+    }
+    for row in page.get("items", []):
+        payload = row.get("payload") or {}
+        signal_id = payload.get("signal_id")
+        intent = intents.get(signal_id)
+        if not intent:
+            continue
+        if row.get("event_type") == "signal_intent":
+            continue
+        payload.setdefault("symbol", intent.get("symbol"))
+        payload.setdefault("direction", intent.get("direction"))
+        payload.setdefault("reference_price", intent.get("reference_price"))
+        payload.setdefault("spread_points", intent.get("spread_points"))
+        fill_price = payload.get("fill_price")
+        reference_price = intent.get("reference_price")
+        if fill_price is not None and reference_price:
+            direction_sign = 1 if str(intent.get("direction", "long")).lower() == "long" else -1
+            adverse_slippage = (float(fill_price) - float(reference_price)) * direction_sign
+            payload["slippage_price"] = adverse_slippage
+            payload["slippage_bps"] = adverse_slippage / float(reference_price) * 10_000
+        signal_ts = intent.get("timestamp")
+        execution_ts = payload.get("timestamp")
+        if signal_ts and execution_ts:
+            signal_dt = datetime.fromisoformat(str(signal_ts).replace("Z", "+00:00"))
+            execution_dt = datetime.fromisoformat(str(execution_ts).replace("Z", "+00:00"))
+            payload["signal_to_fill_seconds"] = max(0, (execution_dt - signal_dt).total_seconds())
+        row["payload"] = payload
+    return page
+
+
 def _datetime_filter(value: datetime) -> str:
     if value.tzinfo is None:
         value = value.replace(tzinfo=timezone.utc)
@@ -371,6 +407,7 @@ def create_app() -> FastAPI:
                 "current_mode": observed_mode,
                 "mode_status": "unconfirmed" if observed_mode is None else "matches_expected" if observed_mode == strategy.expected_mode else "mode_mismatch",
                 "mode_observed_at": starts[0].get("received_at") if starts else None,
+                "broker_utc_offset_minutes": start_payload.get("broker_utc_offset_minutes"),
                 "metrics": stats[0] if stats else None,
                 "alerts": strategy_alerts,
                 "last_heartbeat_at": heartbeat[0].get("ts") if heartbeat else None,
@@ -473,7 +510,13 @@ def create_app() -> FastAPI:
         if to:
             query = query.lte("ts", _datetime_filter(to))
         query = query.order("ts", desc=True)
-        return _monitoring_page(query, limit=limit, offset=offset)
+        page = _monitoring_page(query, limit=limit, offset=offset)
+        context_rows = (
+            supabase.table("event_raw").select("event_type,payload")
+            .eq("strategy_id", strategy_id).eq("event_type", "signal_intent")
+            .order("ts", desc=True).range(0, 4999).execute().data or []
+        )
+        return enrich_execution_events(page, context_rows)
 
     @app.get("/portfolios/{portfolio_id}/trades", dependencies=[Depends(verify_token)])
     async def read_portfolio_trades(
