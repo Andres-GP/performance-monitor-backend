@@ -316,7 +316,11 @@ def create_app() -> FastAPI:
     @app.post("/monitor/events", dependencies=[Depends(verify_token)])
     async def ingest_monitoring_event(request: Request):
         try:
-            envelope = await request.json()
+            # Older MetaTrader builds included StringToCharArray's terminal NUL
+            # in the HTTP body. It is not valid JSON framing, but removing only
+            # trailing NUL bytes keeps those existing EAs compatible.
+            raw_body = (await request.body()).rstrip(b"\x00")
+            envelope = json.loads(raw_body)
         except Exception as exc:
             raise HTTPException(status_code=400, detail="Invalid JSON body") from exc
         if not isinstance(envelope, dict):

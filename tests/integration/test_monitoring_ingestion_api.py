@@ -17,6 +17,20 @@ def test_monitor_event_ingestion_route_dispatches_valid_envelope(client, auth_he
     assert response.json() == {"status": "processed", "strategy_id": "MONDAY_BTCJPY"}
 
 
+def test_monitor_event_ingestion_route_accepts_legacy_trailing_nul(client, auth_header, mocker):
+    mocker.patch(
+        "app.api.ingest_event",
+        return_value={"status": "processed", "strategy_id": "GOTOBI_USDJPY"},
+    )
+    response = client.post(
+        "/monitor/events",
+        content=b'{"event_type":"heartbeat","payload":{"strategy_id":"GOTOBI_USDJPY"}}\x00',
+        headers={**auth_header, "Content-Type": "application/json"},
+    )
+    assert response.status_code == 200
+    assert response.json() == {"status": "processed", "strategy_id": "GOTOBI_USDJPY"}
+
+
 def test_monitor_event_ingestion_route_rejects_malformed_event_after_dispatch(client, auth_header, mocker):
     from app.monitoring.ingestion import EventValidationError
 
