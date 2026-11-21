@@ -453,6 +453,12 @@ def _resolve_strategy(
         direct = next((item for item in registry.strategies if item.id == external_id), None)
         if direct:
             return direct
+        # MT5 telemetry events usually carry the EA-generated ID but omit the
+        # separate strategy name. The ID embeds the EA name/prefix, so use it
+        # to resolve the configured broker portfolio before treating the EA as
+        # an unregistered source.
+        if not source_name:
+            source_name = external_id
     if source_name:
         matched = registry.match_strategy(source_name)
         if matched:
