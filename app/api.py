@@ -1035,9 +1035,25 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=400, detail="Invalid JSON body")
         
         strategy_id = data.get("strategy_id")
-        record_monitoring_event("heartbeat", data)
         if not strategy_id:
             raise HTTPException(status_code=400, detail="strategy_id required")
+
+        if monitoring_ready:
+            # Legacy EAs identify strategies by their chart name (for example,
+            # TIS_RSI2_QQQ_QQQ_D1). Resolve that name through the canonical registry
+            # and store the heartbeat in the normalized monitoring tables.
+            source_name = data.get("strategy_name") or str(strategy_id)
+            data["strategy_name"] = source_name
+            data.setdefault("ts", datetime.now(timezone.utc).isoformat())
+            resolved = next(
+                (item for item in monitoring_registry.strategies if item.id == str(strategy_id)),
+                None,
+            ) or monitoring_registry.match_strategy(str(source_name))
+            if resolved:
+                result = record_monitoring_event("heartbeat", data)
+                if result is None:
+                    raise HTTPException(status_code=503, detail="Heartbeat ingestion unavailable")
+                return {"status": "ok", "strategy_id": resolved.id}
         
         strategy = supabase.table("strategies").select("strategy_id").eq("strategy_id", strategy_id).execute()
         if not strategy.data:
