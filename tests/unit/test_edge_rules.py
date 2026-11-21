@@ -37,6 +37,35 @@ def test_no_backtest_baselines_produce_no_edge_alerts():
     assert result == {"state": "NO_BASELINE", "n_trades": 50, "signals": []}
 
 
+def test_live_decision_rules_work_without_backtest_baseline():
+    registry = load_registry()
+    target = next(item for item in registry.strategies if item.id == "MONDAY_BTCJPY")
+    result = evaluate_edge_decay(target, {
+        "rolling_50": {
+            "n_trades": 50,
+            "average_net_per_trade": -2.5,
+            "profit_factor": 1.02,
+            "t_stat_net_per_trade": 0.8,
+        },
+    }, [], now=NOW)
+    assert result["state"] == "NO_BASELINE"
+    signals = {item["rule_key"]: item for item in result["signals"]}
+    assert {"PAUSE_NEGATIVE_NET_MEAN", "DISCARD_CANDIDATE_LOW_PF", "DISCARD_CANDIDATE_LOW_T_STAT"} <= set(signals)
+    assert "automatic action" in signals["PAUSE_NEGATIVE_NET_MEAN"]["context"]["recommendation"]
+
+
+def test_drawdown_beyond_monte_carlo_case_recommends_review():
+    registry = load_registry()
+    target = strategy(registry, "MONDAY_BTCJPY", {"mc_expected_max_dd_pct": 8.5})
+    result = evaluate_edge_decay(target, {
+        "max_dd_pct": 8.7,
+        "rolling_50": {"n_trades": 20},
+    }, [], now=NOW)
+    signal = next(item for item in result["signals"] if item["rule_key"] == "PAUSE_DD_BEYOND_MONTE_CARLO")
+    assert signal["severity"] == "critical"
+    assert signal["context"]["observed_max_dd_pct"] == 8.7
+
+
 def test_wr_pf_expectancy_cost_and_loss_streak_rules_include_sample_size():
     registry = load_registry()
     target = strategy(registry, "MONDAY_BTCJPY", {
@@ -49,7 +78,7 @@ def test_wr_pf_expectancy_cost_and_loss_streak_rules_include_sample_size():
         "exit_time": NOW - timedelta(days=day),
         "profit": 4,
         "commission": -1,
-        "swap_estimate": -1,
+        "swap": -1,
     } for day in range(20)]
     result = evaluate_edge_decay(target, {
         "rolling_50": {

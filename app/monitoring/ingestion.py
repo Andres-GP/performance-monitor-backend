@@ -55,6 +55,11 @@ class TradeClosedEvent(EventPayload):
     exit_price: float = Field(gt=0)
     profit: float = Field(validation_alias=AliasChoices("profit", "pnl"))
     commission: float | None = Field(default=None, validation_alias=AliasChoices("commission", "cost"))
+    swap: float | None = None
+    spread_cost: float | None = None
+    slippage: float | None = None
+    reference_price: float | None = Field(default=None, gt=0)
+    currency: str | None = None
     trade_type: Literal["long", "short"] = Field(validation_alias=AliasChoices("type", "direction", "trade_type"))
     equity_at_open: float | None = None
 
@@ -86,6 +91,49 @@ class OrderRejectedEvent(EventPayload):
     ts: datetime | None = Field(default=None, validation_alias=AliasChoices("ts", "timestamp"))
 
 
+class SignalIntentEvent(EventPayload):
+    signal_id: str
+    symbol: str = Field(validation_alias=AliasChoices("symbol", "instrument"))
+    direction: Literal["long", "short"]
+    reference_price: float = Field(gt=0)
+    volume: float = Field(gt=0)
+    bid_price: float | None = Field(default=None, gt=0)
+    ask_price: float | None = Field(default=None, gt=0)
+    spread_points: float | None = Field(default=None, ge=0)
+    timestamp: datetime
+
+
+class ExecutionUpdateEvent(EventPayload):
+    signal_id: str
+    status: Literal["submitted", "filled", "partial", "cancelled", "rejected", "not_sent"]
+    filled_volume: float = Field(default=0, ge=0)
+    fill_price: float | None = Field(default=None, gt=0)
+    reason: str | None = None
+    timestamp: datetime
+
+
+class PositionSnapshotPosition(BaseModel):
+    ticket: str | int
+    symbol: str
+    direction: Literal["long", "short"]
+    volume: float = Field(gt=0)
+    entry_price: float = Field(gt=0)
+    current_price: float = Field(gt=0)
+    profit: float
+    swap: float
+    stop_loss: float | None = Field(default=None, ge=0)
+    risk_at_stop: float | None = Field(default=None, ge=0)
+
+
+class PositionSnapshotEvent(EventPayload):
+    positions: list[PositionSnapshotPosition]
+    equity: float = Field(gt=0)
+    margin_used: float = Field(ge=0)
+    free_margin: float = Field(ge=0)
+    currency: str | None = None
+    timestamp: datetime
+
+
 class HeartbeatEvent(EventPayload):
     ts: datetime | None = Field(default=None, validation_alias=AliasChoices("ts", "timestamp"))
 
@@ -103,6 +151,9 @@ EVENT_MODELS: dict[str, type[EventPayload]] = {
     "trade_closed": TradeClosedEvent,
     "health_alert": HealthAlertEvent,
     "order_rejected": OrderRejectedEvent,
+    "signal_intent": SignalIntentEvent,
+    "execution_update": ExecutionUpdateEvent,
+    "position_snapshot": PositionSnapshotEvent,
     "heartbeat": HeartbeatEvent,
     "alert": FreeAlertEvent,
 }
@@ -121,12 +172,14 @@ class IngestionRepository(Protocol):
     def find_equity_sample(self, strategy_id: str, ts: datetime) -> dict[str, Any] | None: ...
     def find_previous_equity(self, strategy_id: str, ts: datetime) -> dict[str, Any] | None: ...
     def has_closed_trade_between(self, strategy_id: str, start: datetime, end: datetime) -> bool: ...
-    def has_open_position(self, strategy_id: str, ts: datetime) -> bool: ...
+    def has_open_position(self, strategy_id: str, ts: datetime) -> bool | None: ...
     def upsert_equity_sample(self, record: dict[str, Any]) -> None: ...
     def upsert_trade(self, record: dict[str, Any]) -> None: ...
     def overlapping_trades(self, strategy_id: str, entry_time: datetime, exit_time: datetime) -> list[dict[str, Any]]: ...
     def recent_order_rejections(self, strategy_id: str, since: datetime) -> list[dict[str, Any]]: ...
     def insert_heartbeat(self, record: dict[str, Any]) -> None: ...
+    def upsert_position_snapshot(self, record: dict[str, Any]) -> None: ...
+    def latest_position_snapshot(self, strategy_id: str) -> dict[str, Any] | None: ...
 
 
 class SupabaseMonitoringRepository:
@@ -288,9 +341,29 @@ class SupabaseMonitoringRepository:
         )
         return bool(result.data)
 
-    def has_open_position(self, strategy_id: str, ts: datetime) -> bool:
-        # The current EA contract sends no open-position snapshots; avoid inventing one.
-        return False
+    def has_open_position(self, strategy_id: str, ts: datetime) -> bool | None:
+        snapshot = self.latest_position_snapshot(strategy_id)
+        if snapshot is None:
+            return None
+        age = ts.astimezone(UTC) - _parse_repo_time(snapshot["ts"])
+        if age > timedelta(minutes=3) or age < timedelta(minutes=-1):
+            return None
+        return bool(snapshot.get("positions"))
+
+    def latest_position_snapshot(self, strategy_id: str) -> dict[str, Any] | None:
+        try:
+            response = (
+                self.client.table("position_snapshot").select("*")
+                .eq("strategy_id", strategy_id).limit(1).execute()
+            )
+            return response.data[0] if response.data else None
+        except Exception:
+            # Until migration 0004 is applied, position state is unknown. That
+            # must not block equity ingestion or be treated as a flat account.
+            return None
+
+    def upsert_position_snapshot(self, record: dict[str, Any]) -> None:
+        self.client.table("position_snapshot").upsert(record, on_conflict="strategy_id").execute()
 
     def upsert_equity_sample(self, record: dict[str, Any]) -> None:
         self.client.table("equity_sample").upsert(
@@ -298,9 +371,24 @@ class SupabaseMonitoringRepository:
         ).execute()
 
     def upsert_trade(self, record: dict[str, Any]) -> None:
-        self.client.table("trade").upsert(
-            record, on_conflict="strategy_id,ticket,exit_time", ignore_duplicates=True
-        ).execute()
+        try:
+            self.client.table("trade").upsert(
+                record, on_conflict="strategy_id,ticket,exit_time", ignore_duplicates=True
+            ).execute()
+        except Exception as exc:
+            # Keep trade ingestion available while an operator applies additive
+            # cost columns to an existing Supabase database. The full raw event
+            # remains available in event_raw until those columns are migrated.
+            message = str(exc).lower()
+            optional_fields = {"swap", "spread_cost", "slippage", "reference_price", "currency"}
+            if "column" not in message or not optional_fields.intersection(record):
+                raise
+            compatible_record = {key: value for key, value in record.items() if key not in optional_fields}
+            self.client.table("trade").upsert(
+                compatible_record,
+                on_conflict="strategy_id,ticket,exit_time",
+                ignore_duplicates=True,
+            ).execute()
 
     def overlapping_trades(self, strategy_id: str, entry_time: datetime, exit_time: datetime) -> list[dict[str, Any]]:
         response = (
@@ -394,13 +482,27 @@ def _idempotency_key(event_type: str, payload: dict[str, Any], provided: str | N
             "exit_price": payload.get("exit_price"),
             "profit": payload.get("profit", payload.get("pnl")),
         }
-    elif event_type in {"equity", "heartbeat", "bar_update", "health_alert", "order_rejected"}:
+    elif event_type in {"signal_intent", "execution_update"}:
+        signal_id = payload.get("signal_id")
+        if not signal_id:
+            return None
+        identity = {
+            "strategy_id": external_id,
+            "signal_id": signal_id,
+            "type": event_type,
+        }
+        if event_type == "execution_update":
+            identity["status"] = payload.get("status")
+            identity["ts"] = payload.get("ts", payload.get("timestamp"))
+    elif event_type in {"equity", "heartbeat", "bar_update", "health_alert", "order_rejected", "position_snapshot"}:
         ts = payload.get("ts", payload.get("timestamp"))
         if ts is None:
             return None
         identity = {"strategy_id": external_id, "ts": ts, "type": event_type}
         if event_type == "bar_update":
             identity["bars_total"] = payload.get("bars_total")
+        elif event_type == "position_snapshot":
+            identity["positions"] = payload.get("positions")
         elif event_type == "health_alert":
             identity["alert_type"] = payload.get("type", payload.get("problem_type"))
             identity["message"] = payload.get("message", payload.get("details"))
@@ -417,6 +519,10 @@ def _event_timestamps(event_type: str, payload: dict[str, Any], parsed: EventPay
     if event_type == "trade_closed":
         event = parsed
         return {"entry_time": event.entry_time, "exit_time": event.exit_time}  # type: ignore[attr-defined]
+    if event_type in {"signal_intent", "execution_update"}:
+        return {"ts": parsed.timestamp}  # type: ignore[attr-defined]
+    if event_type == "position_snapshot":
+        return {"ts": parsed.timestamp}  # type: ignore[attr-defined]
     if event_type == "strategy_started":
         timestamp = parsed.start_date  # type: ignore[attr-defined]
     elif event_type == "health_alert":
@@ -520,14 +626,19 @@ def ingest_event(
 
     portfolio = next(item for item in registry.portfolios if item.id == strategy.portfolio_id)
     timestamps = _event_timestamps(event_type, payload, parsed)
-    if timestamps and not portfolio.server_time_to_utc_enabled:
+    timestamps_are_utc = payload.get("timestamps_in_utc") is True
+    if timestamps and not timestamps_are_utc and not portfolio.server_time_to_utc_enabled:
         return {
             "status": "pending_offset",
             "strategy_id": strategy.id,
             "reason": "verified_server_utc_offset_required",
         }
 
-    normalized = {field: server_time_to_utc(value, portfolio.server_utc_offset_hours) for field, value in timestamps.items()}
+    normalized = {
+        field: value.astimezone(UTC) if timestamps_are_utc
+        else server_time_to_utc(value, portfolio.server_utc_offset_hours)
+        for field, value in timestamps.items()
+    }
     source_event_ts = normalized.get("ts") or normalized.get("exit_time")
     event_ts = source_event_ts or received_at
 
@@ -553,6 +664,11 @@ def ingest_event(
             "exit_price": event.exit_price,
             "profit": event.profit,
             "commission": event.commission,
+            "swap": event.swap,
+            "spread_cost": event.spread_cost,
+            "slippage": event.slippage,
+            "reference_price": event.reference_price,
+            "currency": event.currency,
             "trade_type": event.trade_type,
             "hold_minutes": hold_minutes,
             "pnl_pct_equity": (event.profit / equity * 100) if equity and equity > 0 else None,
@@ -593,7 +709,9 @@ def ingest_event(
                 strategy.id, _parse_repo_time(prior["ts"]), sample_ts
             )
             position_open = repository.has_open_position(strategy.id, sample_ts)
-            jump_is_suspected = delta > 0.005 and not trade_since and not position_open
+            # Only call a balance jump a cash flow when current position state is
+            # known to be flat. Missing or stale snapshots are not evidence of flatness.
+            jump_is_suspected = delta > 0.005 and not trade_since and position_open is False
             cashflow_newly_suspected = jump_is_suspected and not already_flagged
             cashflow_suspected = already_flagged or jump_is_suspected
         repository.upsert_equity_sample({
@@ -625,6 +743,17 @@ def ingest_event(
             "ts": _iso(normalized.get("ts", received_at)),
             "received_at": _iso(received_at),
             "payload": payload,
+        })
+    elif event_type == "position_snapshot":
+        event: PositionSnapshotEvent = parsed  # type: ignore[assignment]
+        repository.upsert_position_snapshot({
+            "strategy_id": strategy.id,
+            "ts": _iso(normalized["ts"]),
+            "positions": [position.model_dump(mode="json") for position in event.positions],
+            "equity": event.equity,
+            "margin_used": event.margin_used,
+            "free_margin": event.free_margin,
+            "currency": event.currency,
         })
     elif event_type in {"health_alert", "order_rejected"}:
         if event_type == "health_alert":

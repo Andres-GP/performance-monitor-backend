@@ -33,13 +33,46 @@ def evaluate_edge_decay(
     applicable_baselines = strategy.baselines.model_dump(exclude_none=True)
     if n_trades < 20:
         return {"state": "INSUFFICIENT_DATA", "n_trades": n_trades, "signals": []}
-    if not applicable_baselines:
-        return {"state": "NO_BASELINE", "n_trades": n_trades, "signals": []}
 
     signals: list[dict[str, Any]] = []
 
     def add(rule_key: str, severity: str, context: dict[str, Any]):
         signals.append({"rule_key": rule_key, "severity": severity, "context": {**context, "n_trades": n_trades}})
+
+    # These decision-support rules use live observations and do not require a
+    # backtest baseline. They recommend review only; they never stop an EA.
+    live_mean = rolling.get("average_net_per_trade")
+    if live_mean is not None and float(live_mean) <= 0:
+        add("PAUSE_NEGATIVE_NET_MEAN", "high", {
+            "average_net_per_trade": live_mean,
+            "recommendation": "Review whether to pause; no automatic action was taken.",
+        })
+    live_pf_for_decision = rolling.get("profit_factor")
+    if n_trades >= 50 and live_pf_for_decision is not None and float(live_pf_for_decision) < 1.05:
+        add("DISCARD_CANDIDATE_LOW_PF", "high", {
+            "live_profit_factor": live_pf_for_decision,
+            "threshold": 1.05,
+            "recommendation": "Review the strategy for possible discard after sustained underperformance.",
+        })
+    live_t_stat = rolling.get("t_stat_net_per_trade")
+    if n_trades >= 50 and live_t_stat is not None and float(live_t_stat) < 1.5:
+        add("DISCARD_CANDIDATE_LOW_T_STAT", "high", {
+            "t_stat_net_per_trade": live_t_stat,
+            "threshold": 1.5,
+            "recommendation": "Review the strategy for possible discard; this is not an automatic action.",
+        })
+
+    monte_carlo_dd = strategy.baselines.mc_expected_max_dd_pct
+    observed_max_dd = metrics.get("max_dd_pct")
+    if monte_carlo_dd is not None and observed_max_dd is not None and float(observed_max_dd) > monte_carlo_dd:
+        add("PAUSE_DD_BEYOND_MONTE_CARLO", "critical", {
+            "observed_max_dd_pct": observed_max_dd,
+            "mc_expected_max_dd_pct": monte_carlo_dd,
+            "recommendation": "Review whether to pause; no automatic action was taken.",
+        })
+
+    if not applicable_baselines:
+        return {"state": "NO_BASELINE", "n_trades": n_trades, "signals": signals}
 
     bt_wr = strategy.baselines.bt_win_rate
     live_wr = rolling.get("win_rate")
@@ -54,13 +87,17 @@ def evaluate_edge_decay(
                 "two_sigma_band": band,
             })
 
-    bt_pf = strategy.baselines.bt_profit_factor
+    bt_pf = (
+        strategy.baselines.oos_profit_factor
+        if strategy.baselines.oos_profit_factor is not None
+        else strategy.baselines.bt_profit_factor
+    )
     live_pf = rolling.get("profit_factor")
     if bt_pf is not None and live_pf is not None and (float(live_pf) < 1.0 or float(live_pf) < 0.5 * bt_pf):
         add("PF_DRIFT", "high", {"live_profit_factor": live_pf, "backtest_profit_factor": bt_pf, "threshold": max(1.0, 0.5 * bt_pf)})
 
     live_expectancy = rolling.get("expectancy_pct")
-    if live_expectancy is not None and float(live_expectancy) < 0:
+    if live_expectancy is not None and float(live_expectancy) < 0 and live_mean is None:
         add("EXPECTANCY_NEG", "high", {"live_expectancy_pct": live_expectancy, "threshold_pct": 0})
 
     baseline_frequency = strategy.baselines.bt_trades_per_month
@@ -76,13 +113,30 @@ def evaluate_edge_decay(
             })
 
     baseline_cost = strategy.baselines.bt_cost_ratio
-    cost_rows = [trade for trade in trades[-window:] if trade.get("swap_estimate") is not None and trade.get("commission") is not None]
+    cost_rows = [
+        trade for trade in trades[-window:]
+        if any(trade.get(field) is not None for field in ("swap", "swap_estimate", "commission", "spread_cost"))
+    ]
     if baseline_cost is not None and cost_rows:
-        gross_wins = [float(row["profit"]) - float(row.get("commission", 0)) for row in cost_rows]
+        # MT5's normalized `profit` is already net of broker costs. Add known
+        # costs back to estimate gross positive P&L; never require the legacy
+        # `swap_estimate` field, which the EA contract does not send.
+        gross_wins = [
+            float(row["profit"])
+            + abs(float(row.get("commission") or 0))
+            + abs(float(row.get("swap", row.get("swap_estimate")) or 0))
+            + abs(float(row.get("spread_cost") or 0))
+            for row in cost_rows
+        ]
         positive_gross = [value for value in gross_wins if value > 0]
         if positive_gross:
             average_gross = sum(positive_gross) / len(positive_gross)
-            average_cost = sum(abs(float(row["commission"])) + abs(float(row["swap_estimate"])) for row in cost_rows) / len(cost_rows)
+            average_cost = sum(
+                abs(float(row.get("commission") or 0))
+                + abs(float(row.get("swap", row.get("swap_estimate")) or 0))
+                + abs(float(row.get("spread_cost") or 0))
+                for row in cost_rows
+            ) / len(cost_rows)
             live_cost_ratio = average_cost / average_gross
             if live_cost_ratio > 2 * baseline_cost:
                 add("COST_DRIFT", "medium", {

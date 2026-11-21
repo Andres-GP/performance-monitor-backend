@@ -129,7 +129,7 @@ def _equity_summary(
             "total_dd_pct": None,
             "max_dd_pct": None,
             "pnl": None,
-            "server_date": server_date,
+            "server_date": server_date or as_of.date(),
             "_day_start_equity": None,
         }
 
@@ -154,7 +154,10 @@ def _equity_summary(
             "total_dd_pct": total_dd_pct,
             "max_dd_pct": max_dd_pct,
             "pnl": None,
-            "server_date": None,
+            # UTC is an explicit, trustworthy day boundary for new EA events.
+            # Persist summaries under UTC dates while leaving daily DD disabled
+            # until the broker-server offset is verified.
+            "server_date": as_of.date(),
             "_day_start_equity": None,
         }
 
@@ -201,6 +204,14 @@ def calculate_trade_metrics(trades: list[dict[str, Any]]) -> dict[str, Any]:
     gross_profit = sum(profit for profit in profits if profit > 0)
     gross_loss = -sum(profit for profit in profits if profit < 0)
     profit_factor = gross_profit / gross_loss if gross_loss > 0 else None
+    average_net_per_trade = sum(profits) / len(profits) if profits else None
+    if len(profits) >= 2:
+        mean_profit = average_net_per_trade
+        variance = sum((profit - mean_profit) ** 2 for profit in profits) / (len(profits) - 1)
+        standard_error = (variance / len(profits)) ** 0.5
+        t_stat_net_per_trade = mean_profit / standard_error if standard_error > 0 else None
+    else:
+        t_stat_net_per_trade = None
     holds = [float(trade["hold_minutes"]) for trade in ordered if trade.get("hold_minutes") is not None]
     expectancy_values = [
         float(trade["pnl_pct_equity"])
@@ -217,12 +228,15 @@ def calculate_trade_metrics(trades: list[dict[str, Any]]) -> dict[str, Any]:
             current_loss_streak = 0
     return {
         "trade_count": len(ordered),
+        "net_profit": sum(profits) if profits else None,
+        "average_net_per_trade": average_net_per_trade,
+        "t_stat_net_per_trade": t_stat_net_per_trade,
         "win_rate": wins / len(ordered) * 100 if ordered else None,
         "profit_factor": profit_factor,
         "expectancy_pct": sum(expectancy_values) / len(expectancy_values) if expectancy_values else None,
         "avg_hold_minutes": sum(holds) / len(holds) if holds else None,
-        "current_loss_streak": current_loss_streak,
-        "max_loss_streak": max_loss_streak,
+        "current_loss_streak": current_loss_streak if profits else None,
+        "max_loss_streak": max_loss_streak if profits else None,
     }
 
 
@@ -248,12 +262,15 @@ def calculate_strategy_metrics(
         as_of=as_of,
     )
     metrics = calculate_trade_metrics(trades)
+    recent_cutoff = _as_utc(as_of) - timedelta(days=90)
+    recent_trade_count = sum(_as_utc(trade["exit_time"]) >= recent_cutoff for trade in _sorted_trades(trades))
     return {
         "strategy_id": strategy_id,
         "portfolio_id": None,
         "ts": _as_utc(as_of),
         **equity,
         **metrics,
+        "trades_per_year_live_90d": recent_trade_count / 90 * 365,
         "rolling_20": _rolling_metrics(trades, 20),
         "rolling_50": _rolling_metrics(trades, 50),
         "_trades": _sorted_trades(trades),
@@ -261,20 +278,21 @@ def calculate_strategy_metrics(
     }
 
 
-def _merge_account_equity_curves(curves: list[list[dict[str, Any]]]) -> list[dict[str, Any]]:
-    """Select the freshest strategy sample per minute for a shared account curve.
-
-    Each EA reports account equity, so summing samples would count the same account
-    balance multiple times when several EAs share a portfolio.
-    """
+def merge_account_equity_samples(samples: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Select one freshest account-equity sample per minute across EAs."""
     by_minute: dict[datetime, dict[str, Any]] = {}
-    for curve in curves:
-        for sample in curve:
-            minute = sample["ts"].replace(second=0, microsecond=0)
-            current = by_minute.get(minute)
-            if current is None or sample["ts"] >= current["ts"]:
-                by_minute[minute] = sample
+    for sample in samples:
+        ts = _as_utc(sample["ts"])
+        minute = ts.replace(second=0, microsecond=0)
+        current = by_minute.get(minute)
+        if current is None or ts >= current["ts"]:
+            by_minute[minute] = {**sample, "ts": ts}
     return [by_minute[key] for key in sorted(by_minute)]
+
+
+def _merge_account_equity_curves(curves: list[list[dict[str, Any]]]) -> list[dict[str, Any]]:
+    """Combine shared-account EA streams without counting account equity twice."""
+    return merge_account_equity_samples([sample for curve in curves for sample in curve])
 
 
 def calculate_portfolio_metrics(
@@ -345,6 +363,15 @@ def recalculate_monitoring_metrics(
             offset_hours=portfolio.server_utc_offset_hours,
             offset_verified=portfolio.server_time_to_utc_enabled,
             as_of=as_of,
+        )
+        metrics["trades_per_year_expected"] = (
+            strategy.baselines.bt_trades_per_month * 12
+            if strategy.baselines.bt_trades_per_month is not None else None
+        )
+        expected_frequency = metrics["trades_per_year_expected"]
+        metrics["frequency_vs_expected_pct"] = (
+            (metrics["trades_per_year_live_90d"] - expected_frequency) / expected_frequency * 100
+            if expected_frequency and expected_frequency > 0 else None
         )
         strategy_results[strategy.id] = metrics
         strategies_by_portfolio.setdefault(strategy.portfolio_id, []).append(metrics)

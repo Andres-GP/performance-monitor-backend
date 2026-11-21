@@ -1,10 +1,13 @@
 from copy import deepcopy
 from datetime import datetime, timezone
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 
 from app.monitoring.ingestion import (
     EventValidationError,
+    SupabaseMonitoringRepository,
     ingest_event,
     server_time_to_utc,
 )
@@ -20,6 +23,7 @@ class MemoryRepository:
         self.equities = {}
         self.trades = []
         self.heartbeats = []
+        self.position_snapshots = {}
 
     def insert_event_raw(self, record):
         key = record.get("idempotency_key")
@@ -93,7 +97,19 @@ class MemoryRepository:
         )
 
     def has_open_position(self, strategy_id, ts):
-        return False
+        snapshot = self.position_snapshots.get(strategy_id)
+        if snapshot is None:
+            return None
+        age = ts - self._dt(snapshot["ts"])
+        if age.total_seconds() > 180 or age.total_seconds() < -60:
+            return None
+        return bool(snapshot["positions"])
+
+    def latest_position_snapshot(self, strategy_id):
+        return deepcopy(self.position_snapshots.get(strategy_id))
+
+    def upsert_position_snapshot(self, record):
+        self.position_snapshots[record["strategy_id"]] = deepcopy(record)
 
     def upsert_equity_sample(self, record):
         self.equities[(record["strategy_id"], record["ts"])] = deepcopy(record)
@@ -137,6 +153,49 @@ def test_server_time_is_converted_using_verified_portfolio_offset():
     assert normalized.isoformat() == "2026-11-18T08:30:00+00:00"
 
 
+def test_trade_storage_falls_back_until_cost_columns_are_migrated():
+    client = MagicMock()
+    with_costs = MagicMock()
+    with_costs.execute.side_effect = RuntimeError("Could not find the 'swap' column of 'trade'")
+    without_costs = MagicMock()
+    without_costs.execute.return_value = SimpleNamespace(data=[])
+    table = client.table.return_value
+    table.upsert.side_effect = [with_costs, without_costs]
+
+    SupabaseMonitoringRepository(client).upsert_trade({
+        "strategy_id": "MONDAY_BTCJPY", "profit": 10, "swap": -0.2,
+        "currency": "USD", "commission": 0.5,
+    })
+
+    calls = table.upsert.call_args_list
+    assert "swap" in calls[0].args[0]
+    assert calls[1].args[0] == {
+        "strategy_id": "MONDAY_BTCJPY", "profit": 10, "commission": 0.5,
+    }
+
+
+@pytest.mark.parametrize(("event_type", "payload"), [
+    ("signal_intent", {
+        "strategy_id": "MONDAY_BTCJPY", "signal_id": "S-1", "symbol": "BTCJPY",
+        "direction": "long", "reference_price": 100, "volume": 0.1,
+        "timestamp": "2026-11-20T10:00:00Z",
+    }),
+    ("execution_update", {
+        "strategy_id": "MONDAY_BTCJPY", "signal_id": "S-1", "status": "partial",
+        "filled_volume": 0.05, "fill_price": 100.02,
+        "timestamp": "2026-11-20T10:00:01Z",
+    }),
+])
+def test_signal_and_execution_events_are_normalized_and_retained(event_type, payload, registry_with_offset):
+    repository = MemoryRepository()
+
+    result = ingest_event(event_type, payload, repository, registry_with_offset)
+
+    assert result == {"status": "processed", "strategy_id": "MONDAY_BTCJPY"}
+    assert repository.raw_events[0]["ingest_status"] == "processed"
+    assert repository.raw_events[0]["ts"] is not None
+
+
 def test_trade_event_is_raw_idempotent_normalized_and_calculated(registry_with_offset):
     repository = MemoryRepository()
     repository.equities[("MONDAY_BTCJPY", "2026-11-15T21:59:00+00:00")] = {
@@ -166,6 +225,11 @@ def test_trade_event_is_raw_idempotent_normalized_and_calculated(registry_with_o
         "exit_price": 101.0,
         "pnl": 10.0,
         "cost": 0.5,
+        "swap": -0.12,
+        "spread_cost": 0.08,
+        "slippage": 0.03,
+        "reference_price": 100.02,
+        "currency": "USD",
         "direction": "Long",
     }
     result = ingest_event("trade_closed", trade, repository, registry_with_offset)
@@ -180,6 +244,12 @@ def test_trade_event_is_raw_idempotent_normalized_and_calculated(registry_with_o
     assert repository.trades[0]["trade_type"] == "long"
     assert repository.trades[0]["ticket"] is None
     assert repository.trades[0]["pnl_pct_equity"] == 0.2
+    assert repository.trades[0]["commission"] == 0.5
+    assert repository.trades[0]["swap"] == -0.12
+    assert repository.trades[0]["spread_cost"] == 0.08
+    assert repository.trades[0]["slippage"] == 0.03
+    assert repository.trades[0]["reference_price"] == 100.02
+    assert repository.trades[0]["currency"] == "USD"
     assert repository.trades[0]["duration_deviation_minutes"] == 0
     assert repository.raw_events[-1]["ts"] == "2026-11-16T22:00:00+00:00"
 
@@ -271,6 +341,11 @@ def test_unknown_source_is_saved_for_review_and_opens_high_alert(registry_with_o
 
 def test_equity_is_sampled_once_per_minute_and_cashflow_jump_is_flagged(registry_with_offset):
     repository = MemoryRepository()
+    repository.upsert_position_snapshot({
+        "strategy_id": "MONDAY_BTCJPY",
+        "ts": "2026-11-18T07:59:00+00:00",
+        "positions": [],
+    })
     first = {"strategy_id": "MONDAY_BTCJPY", "equity": 10000, "ts": "2026-11-18T10:00:02Z"}
     second = {"strategy_id": "MONDAY_BTCJPY", "equity": 10100, "ts": "2026-11-18T10:01:10Z"}
     third = {"strategy_id": "MONDAY_BTCJPY", "equity": 10110, "ts": "2026-11-18T10:01:55Z"}
@@ -318,6 +393,39 @@ def test_unverified_offset_keeps_raw_event_pending_without_processing():
     assert repository.equities == {}
 
 
+def test_explicit_utc_event_is_processed_without_guessing_broker_offset():
+    repository = MemoryRepository()
+    result = ingest_event(
+        "equity",
+        {"strategy_id": "MONDAY_BTCJPY", "equity": 10000, "ts": "2026-11-18T10:00:00Z", "timestamps_in_utc": True},
+        repository,
+        load_registry(),
+    )
+    assert result == {"status": "processed", "strategy_id": "MONDAY_BTCJPY"}
+    assert repository.raw_events[0]["ts"] == "2026-11-18T10:00:00+00:00"
+
+
+def test_position_snapshot_is_normalized_and_supplies_open_state():
+    repository = MemoryRepository()
+    payload = {
+        "strategy_id": "MONDAY_BTCJPY",
+        "timestamps_in_utc": True,
+        "timestamp": "2026-11-18T10:00:00Z",
+        "equity": 10000,
+        "margin_used": 500,
+        "free_margin": 9500,
+        "currency": "USD",
+        "positions": [{
+            "ticket": "123", "symbol": "BTCJPY", "direction": "long", "volume": 0.1,
+            "entry_price": 100, "current_price": 101, "profit": 10, "swap": -1,
+        }],
+    }
+    result = ingest_event("position_snapshot", payload, repository, load_registry())
+    assert result == {"status": "processed", "strategy_id": "MONDAY_BTCJPY"}
+    assert repository.position_snapshots["MONDAY_BTCJPY"]["positions"][0]["ticket"] == "123"
+    assert repository.has_open_position("MONDAY_BTCJPY", datetime(2026, 11, 18, 10, 1, tzinfo=timezone.utc)) is True
+
+
 def test_pending_raw_event_can_be_retried_after_offset_is_verified(registry_with_offset):
     repository = MemoryRepository()
     registry_without_offset = load_registry()
@@ -355,6 +463,9 @@ def test_invalid_event_is_retained_as_rejected_raw_payload(registry_with_offset)
         ("trade_closed", {"strategy_id": "MONDAY_BTCJPY", "symbol": "BTCJPY", "entry_time": "2026-11-18T10:00:00Z", "exit_time": "2026-11-18T10:10:00Z", "volume": 0.1, "entry_price": 100, "exit_price": 101, "profit": 10, "type": "long"}),
         ("health_alert", {"strategy_id": "MONDAY_BTCJPY", "type": "LateEntry", "message": "late", "severity": "medium"}),
         ("order_rejected", {"strategy_id": "MONDAY_BTCJPY", "context": "EntryBuy", "retcode": 10030, "description": "rejected"}),
+        ("signal_intent", {"strategy_id": "MONDAY_BTCJPY", "signal_id": "S-1", "symbol": "BTCJPY", "direction": "long", "reference_price": 100, "volume": 0.1, "timestamp": "2026-11-18T10:00:00Z"}),
+        ("execution_update", {"strategy_id": "MONDAY_BTCJPY", "signal_id": "S-1", "status": "filled", "filled_volume": 0.1, "fill_price": 100, "timestamp": "2026-11-18T10:00:01Z"}),
+        ("position_snapshot", {"strategy_id": "MONDAY_BTCJPY", "timestamp": "2026-11-18T10:00:00Z", "timestamps_in_utc": True, "equity": 10000, "margin_used": 0, "free_margin": 10000, "positions": []}),
         ("heartbeat", {"strategy_id": "MONDAY_BTCJPY"}),
         ("alert", {"strategy_id": "MONDAY_BTCJPY", "text": "EA started"}),
     ],
