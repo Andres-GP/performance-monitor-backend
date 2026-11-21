@@ -1,10 +1,13 @@
 from copy import deepcopy
 from datetime import datetime, timezone
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 
 from app.monitoring.ingestion import (
     EventValidationError,
+    SupabaseMonitoringRepository,
     ingest_event,
     server_time_to_utc,
 )
@@ -135,6 +138,27 @@ def registry_with_offset():
 def test_server_time_is_converted_using_verified_portfolio_offset():
     normalized = server_time_to_utc("2026-11-18T10:30:00Z", 2)
     assert normalized.isoformat() == "2026-11-18T08:30:00+00:00"
+
+
+def test_trade_storage_falls_back_until_cost_columns_are_migrated():
+    client = MagicMock()
+    with_costs = MagicMock()
+    with_costs.execute.side_effect = RuntimeError("Could not find the 'swap' column of 'trade'")
+    without_costs = MagicMock()
+    without_costs.execute.return_value = SimpleNamespace(data=[])
+    table = client.table.return_value
+    table.upsert.side_effect = [with_costs, without_costs]
+
+    SupabaseMonitoringRepository(client).upsert_trade({
+        "strategy_id": "MONDAY_BTCJPY", "profit": 10, "swap": -0.2,
+        "currency": "USD", "commission": 0.5,
+    })
+
+    calls = table.upsert.call_args_list
+    assert "swap" in calls[0].args[0]
+    assert calls[1].args[0] == {
+        "strategy_id": "MONDAY_BTCJPY", "profit": 10, "commission": 0.5,
+    }
 
 
 def test_trade_event_is_raw_idempotent_normalized_and_calculated(registry_with_offset):

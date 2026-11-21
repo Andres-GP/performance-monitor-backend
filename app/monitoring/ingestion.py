@@ -303,9 +303,24 @@ class SupabaseMonitoringRepository:
         ).execute()
 
     def upsert_trade(self, record: dict[str, Any]) -> None:
-        self.client.table("trade").upsert(
-            record, on_conflict="strategy_id,ticket,exit_time", ignore_duplicates=True
-        ).execute()
+        try:
+            self.client.table("trade").upsert(
+                record, on_conflict="strategy_id,ticket,exit_time", ignore_duplicates=True
+            ).execute()
+        except Exception as exc:
+            # Keep trade ingestion available while an operator applies additive
+            # cost columns to an existing Supabase database. The full raw event
+            # remains available in event_raw until those columns are migrated.
+            message = str(exc).lower()
+            optional_fields = {"swap", "spread_cost", "slippage", "reference_price", "currency"}
+            if "column" not in message or not optional_fields.intersection(record):
+                raise
+            compatible_record = {key: value for key, value in record.items() if key not in optional_fields}
+            self.client.table("trade").upsert(
+                compatible_record,
+                on_conflict="strategy_id,ticket,exit_time",
+                ignore_duplicates=True,
+            ).execute()
 
     def overlapping_trades(self, strategy_id: str, entry_time: datetime, exit_time: datetime) -> list[dict[str, Any]]:
         response = (
