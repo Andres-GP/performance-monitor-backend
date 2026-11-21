@@ -55,6 +55,11 @@ class TradeClosedEvent(EventPayload):
     exit_price: float = Field(gt=0)
     profit: float = Field(validation_alias=AliasChoices("profit", "pnl"))
     commission: float | None = Field(default=None, validation_alias=AliasChoices("commission", "cost"))
+    swap: float | None = None
+    spread_cost: float | None = None
+    slippage: float | None = None
+    reference_price: float | None = Field(default=None, gt=0)
+    currency: str | None = None
     trade_type: Literal["long", "short"] = Field(validation_alias=AliasChoices("type", "direction", "trade_type"))
     equity_at_open: float | None = None
 
@@ -553,6 +558,11 @@ def ingest_event(
             "exit_price": event.exit_price,
             "profit": event.profit,
             "commission": event.commission,
+            "swap": event.swap,
+            "spread_cost": event.spread_cost,
+            "slippage": event.slippage,
+            "reference_price": event.reference_price,
+            "currency": event.currency,
             "trade_type": event.trade_type,
             "hold_minutes": hold_minutes,
             "pnl_pct_equity": (event.profit / equity * 100) if equity and equity > 0 else None,

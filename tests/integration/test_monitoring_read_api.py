@@ -81,6 +81,22 @@ def test_strategy_detail_and_paginated_date_filtered_trades(client, auth_header,
     assert len(trades.json()["items"]) == 1
 
 
+def test_portfolio_trades_include_member_strategies_and_cost_fields(client, auth_header, monitoring_tables):
+    trade = {
+        "strategy_id": "MONDAY_BTCJPY", "profit": 5, "volume": 0.2,
+        "trade_type": "long", "commission": 0.5, "swap": -0.1,
+    }
+    monitoring_tables["trade"] = _table([trade], count=1)
+
+    response = client.get("/portfolios/P_AXI/trades?limit=20&offset=0", headers=auth_header)
+
+    assert response.status_code == 200
+    assert response.json()["items"] == [trade]
+    assert response.json()["total"] == 1
+    query = monitoring_tables["trade"].select.return_value
+    query.in_.assert_called_once_with("strategy_id", ["MONDAY_BTCJPY", "GOTOBI_USDJPY_AXI", "WEEKLYMOM_ETHUSD"])
+
+
 def test_equity_filters_and_rejects_reversed_time_range(client, auth_header, monitoring_tables):
     monitoring_tables["equity_sample"] = _table([{"strategy_id": "MONDAY_BTCJPY", "equity": 10100}], count=1)
     response = client.get(

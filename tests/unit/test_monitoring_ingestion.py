@@ -166,6 +166,11 @@ def test_trade_event_is_raw_idempotent_normalized_and_calculated(registry_with_o
         "exit_price": 101.0,
         "pnl": 10.0,
         "cost": 0.5,
+        "swap": -0.12,
+        "spread_cost": 0.08,
+        "slippage": 0.03,
+        "reference_price": 100.02,
+        "currency": "USD",
         "direction": "Long",
     }
     result = ingest_event("trade_closed", trade, repository, registry_with_offset)
@@ -180,6 +185,12 @@ def test_trade_event_is_raw_idempotent_normalized_and_calculated(registry_with_o
     assert repository.trades[0]["trade_type"] == "long"
     assert repository.trades[0]["ticket"] is None
     assert repository.trades[0]["pnl_pct_equity"] == 0.2
+    assert repository.trades[0]["commission"] == 0.5
+    assert repository.trades[0]["swap"] == -0.12
+    assert repository.trades[0]["spread_cost"] == 0.08
+    assert repository.trades[0]["slippage"] == 0.03
+    assert repository.trades[0]["reference_price"] == 100.02
+    assert repository.trades[0]["currency"] == "USD"
     assert repository.trades[0]["duration_deviation_minutes"] == 0
     assert repository.raw_events[-1]["ts"] == "2026-11-16T22:00:00+00:00"
 

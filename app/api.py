@@ -424,6 +424,35 @@ def create_app() -> FastAPI:
         query = query.order("ts", desc=True)
         return _monitoring_page(query, limit=limit, offset=offset)
 
+    @app.get("/portfolios/{portfolio_id}/trades", dependencies=[Depends(verify_token)])
+    async def read_portfolio_trades(
+        portfolio_id: str,
+        from_: datetime | None = Query(None, alias="from"),
+        to: datetime | None = None,
+        limit: int = Query(100, ge=1, le=500),
+        offset: int = Query(0, ge=0),
+    ):
+        if not any(item.id == portfolio_id for item in monitoring_registry.portfolios):
+            raise HTTPException(status_code=404, detail="Portfolio not found")
+        if from_ and to and from_ > to:
+            raise HTTPException(status_code=422, detail="from must be earlier than or equal to to")
+        strategy_ids = [
+            item.id for item in monitoring_registry.strategies
+            if item.portfolio_id == portfolio_id
+        ]
+        if not strategy_ids:
+            return {"items": [], "limit": limit, "offset": offset, "total": 0}
+        query = (
+            supabase.table("trade").select("*", count="exact")
+            .in_("strategy_id", strategy_ids)
+        )
+        if from_:
+            query = query.gte("exit_time", _datetime_filter(from_))
+        if to:
+            query = query.lte("exit_time", _datetime_filter(to))
+        query = query.order("exit_time", desc=True)
+        return _monitoring_page(query, limit=limit, offset=offset)
+
     @app.get("/portfolios/{portfolio_id}/correlation", dependencies=[Depends(verify_token)])
     async def read_portfolio_correlation(
         portfolio_id: str,
