@@ -86,8 +86,16 @@ def scenario_events(scenario: str) -> list[dict[str, Any]]:
             events.append(dict(first))
     elif scenario == "deposit":
         events.extend([
-            _event(scenario, 0, "equity", {"strategy_id": target, "equity": 10000, "ts": "2026-11-09T10:00:00Z"}),
-            _event(scenario, 1, "equity", {"strategy_id": target, "equity": 10100, "ts": "2026-11-09T10:01:00Z"}),
+            _event(scenario, 0, "position_snapshot", {
+                "strategy_id": target,
+                "timestamp": "2026-11-09T09:59:00Z",
+                "equity": 10000,
+                "margin_used": 0,
+                "free_margin": 10000,
+                "positions": [],
+            }),
+            _event(scenario, 1, "equity", {"strategy_id": target, "equity": 10000, "ts": "2026-11-09T10:00:00Z"}),
+            _event(scenario, 2, "equity", {"strategy_id": target, "equity": 10100, "ts": "2026-11-09T10:01:00Z"}),
         ])
     elif scenario == "unknown-source":
         events.append(_event(scenario, 0, "heartbeat", {"strategy_id": "UNKNOWN_REPLAY_EA"}))

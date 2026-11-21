@@ -10,8 +10,10 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 class Baselines(BaseModel):
     bt_win_rate: float | None = None
     bt_profit_factor: float | None = None
+    oos_profit_factor: float | None = None
     bt_avg_trade_pct: float | None = None
     bt_max_dd_pct: float | None = None
+    mc_expected_max_dd_pct: float | None = None
     bt_trades_per_month: float | None = None
     bt_avg_hold_min: float | None = None
     bt_cost_ratio: float | None = Field(default=None, gt=0)

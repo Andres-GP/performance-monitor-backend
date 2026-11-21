@@ -6,6 +6,7 @@ from app.monitoring.derived_metrics import (
     calculate_portfolio_metrics,
     calculate_strategy_metrics,
     calculate_trade_metrics,
+    merge_account_equity_samples,
     recalculate_monitoring_metrics,
     server_daily_close_utc,
 )
@@ -70,6 +71,13 @@ def test_trade_metrics_match_hand_calculated_series():
     assert strategy["rolling_50"]["profit_factor"] == pytest.approx(175 / 75)
 
 
+def test_no_trades_are_reported_as_no_sample_for_loss_streak():
+    metrics = calculate_trade_metrics([])
+    assert metrics["current_loss_streak"] is None
+    assert metrics["max_loss_streak"] is None
+    assert metrics["t_stat_net_per_trade"] is None
+
+
 def test_strategy_drawdown_and_pnl_ignore_suspected_cashflow():
     samples = [
         {"ts": "2026-01-02T00:00:00Z", "equity": 1000, "cashflow_suspected": False},
@@ -131,6 +139,15 @@ def test_portfolio_uses_freshest_account_equity_instead_of_summing_ea_reports():
     )
     assert metrics["equity"] == 112
     assert metrics["peak_equity"] == 112
+
+
+def test_account_equity_samples_are_not_multiplied_by_strategy_count():
+    merged = merge_account_equity_samples([
+        {"strategy_id": "A", "ts": "2026-01-01T00:00:10Z", "equity": 100},
+        {"strategy_id": "B", "ts": "2026-01-01T00:00:40Z", "equity": 101},
+        {"strategy_id": "A", "ts": "2026-01-01T00:01:10Z", "equity": 102},
+    ])
+    assert [sample["equity"] for sample in merged] == [101, 102]
 
 
 def test_recalculation_persists_daily_rows_only_for_verified_offsets():

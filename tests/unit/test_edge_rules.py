@@ -37,6 +37,23 @@ def test_no_backtest_baselines_produce_no_edge_alerts():
     assert result == {"state": "NO_BASELINE", "n_trades": 50, "signals": []}
 
 
+def test_live_decision_rules_work_without_backtest_baseline():
+    registry = load_registry()
+    target = next(item for item in registry.strategies if item.id == "MONDAY_BTCJPY")
+    result = evaluate_edge_decay(target, {
+        "rolling_50": {
+            "n_trades": 50,
+            "average_net_per_trade": -2.5,
+            "profit_factor": 1.02,
+            "t_stat_net_per_trade": 0.8,
+        },
+    }, [], now=NOW)
+    assert result["state"] == "NO_BASELINE"
+    signals = {item["rule_key"]: item for item in result["signals"]}
+    assert {"PAUSE_NEGATIVE_NET_MEAN", "DISCARD_CANDIDATE_LOW_PF", "DISCARD_CANDIDATE_LOW_T_STAT"} <= set(signals)
+    assert "automatic action" in signals["PAUSE_NEGATIVE_NET_MEAN"]["context"]["recommendation"]
+
+
 def test_wr_pf_expectancy_cost_and_loss_streak_rules_include_sample_size():
     registry = load_registry()
     target = strategy(registry, "MONDAY_BTCJPY", {
