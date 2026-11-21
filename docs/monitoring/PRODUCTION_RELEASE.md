@@ -7,19 +7,19 @@
 - Las lecturas de la web llevan un JWT de Clerk. La ingesta de los EAs usa el token de API configurado en cada terminal.
 - No añadir prefijos `/api/...` a estas rutas: ese prefijo pertenece a otro servicio y su listado de rutas no corresponde al contrato de este backend.
 
-## Discrepancia detectada
+## Estado verificado
 
-- El código de `develop` incluye `GET /portfolios` y `POST /monitor/events`; las referencias locales `origin/main` y `origin/staging` no los incluyen todavía.
-- El workflow de Render despliega producción desde `main` y staging desde `staging`.
-- El README y el health check del workflow nombran `performance-monitor-backend.onrender.com`, mientras que el módulo compartido de MetaTrader define `performance-monitor-backend-prod.onrender.com` como host predeterminado.
-- La respuesta `Route not found` con rutas `/api/sites`, `/api/organizations`, `/api/stripe`, etc. no coincide con FastAPI ni con las rutas del frontend. Indica que esa petición llegó a un servicio distinto o a una versión distinta del API.
+- El servicio `performance-monitor-backend-prod` de Render está conectado al repositorio `Andres-GP/performance-monitor-backend`, rama `main`, y desplegó el commit `542329a`.
+- Ese release incluye `GET /portfolios` y `POST /monitor/events`; las referencias remotas `main`, `staging` y `develop` también contienen esas rutas.
+- La URL pública canónica de producción confirmada en Render es `https://performance-monitor-backend-prod.onrender.com`. README, EAs y health check deben usar el mismo host.
+- La respuesta `Route not found` con rutas `/api/sites`, `/api/organizations`, `/api/stripe`, etc. no coincide con FastAPI ni con las rutas de este frontend. La evidencia apunta a que se consultó otro hostname/servicio; el antiguo hostname sin `-prod` no debe usarse.
 
 ## Pasos para cerrar la liberación
 
-1. Confirmar en Render cuál servicio corresponde al backend FastAPI de monitoreo y cuál es su URL pública canónica. Mantener esa misma URL en frontend, EAs y health check de despliegue.
-2. Promover el código de `develop` a la rama de despliegue elegida; confirmar que la instancia de producción contiene `GET /portfolios` y `POST /monitor/events` antes de abrir esas pantallas.
+1. Mantener la URL canónica `https://performance-monitor-backend-prod.onrender.com` en frontend, EAs y health check de despliegue.
+2. Verificar que cada nuevo release de producción conserve `GET /portfolios` y `POST /monitor/events`.
 3. Aplicar las migraciones `db/migrations/0001_monitoring_core.up.sql` y `0002_trade_execution_costs.up.sql` a la base de producción antes de consumir los endpoints normalizados.
-4. Verificar `/health`, `POST /heartbeat`, `POST /monitor/events` y las lecturas autenticadas `/portfolios`, `/alerts` y `/capital/summary` directamente contra el host confirmado.
+4. Verificar `/health`, `POST /heartbeat`, `POST /monitor/events` y las lecturas autenticadas `/portfolios`, `/alerts` y `/capital/summary` directamente contra el host canónico.
 5. Añadir ese host a la lista de URLs permitidas en WebRequest en cada terminal MetaTrader. El error MT5 `4014` sucede antes de que el backend pueda responder.
 6. Después de validar el servicio, ejecutar la tarea pendiente de [QUEUE.md](QUEUE.md) en los EAs.
 

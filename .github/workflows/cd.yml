@@ -63,7 +63,7 @@ jobs:
         run: |
           # Obtener la URL del servicio según la rama
           if [ "${{ github.ref_name }}" == "main" ]; then
-            URL="https://performance-monitor-backend.onrender.com/health"
+            URL="https://performance-monitor-backend-prod.onrender.com/health"
           elif [ "${{ github.ref_name }}" == "staging" ]; then
             URL="https://performance-monitor-backend-staging.onrender.com/health"
           else
