@@ -62,6 +62,15 @@ def evaluate_edge_decay(
             "recommendation": "Review the strategy for possible discard; this is not an automatic action.",
         })
 
+    monte_carlo_dd = strategy.baselines.mc_expected_max_dd_pct
+    observed_max_dd = metrics.get("max_dd_pct")
+    if monte_carlo_dd is not None and observed_max_dd is not None and float(observed_max_dd) > monte_carlo_dd:
+        add("PAUSE_DD_BEYOND_MONTE_CARLO", "critical", {
+            "observed_max_dd_pct": observed_max_dd,
+            "mc_expected_max_dd_pct": monte_carlo_dd,
+            "recommendation": "Review whether to pause; no automatic action was taken.",
+        })
+
     if not applicable_baselines:
         return {"state": "NO_BASELINE", "n_trades": n_trades, "signals": signals}
 
@@ -78,7 +87,11 @@ def evaluate_edge_decay(
                 "two_sigma_band": band,
             })
 
-    bt_pf = strategy.baselines.bt_profit_factor
+    bt_pf = (
+        strategy.baselines.oos_profit_factor
+        if strategy.baselines.oos_profit_factor is not None
+        else strategy.baselines.bt_profit_factor
+    )
     live_pf = rolling.get("profit_factor")
     if bt_pf is not None and live_pf is not None and (float(live_pf) < 1.0 or float(live_pf) < 0.5 * bt_pf):
         add("PF_DRIFT", "high", {"live_profit_factor": live_pf, "backtest_profit_factor": bt_pf, "threshold": max(1.0, 0.5 * bt_pf)})

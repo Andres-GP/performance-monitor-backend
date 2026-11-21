@@ -54,6 +54,18 @@ def test_live_decision_rules_work_without_backtest_baseline():
     assert "automatic action" in signals["PAUSE_NEGATIVE_NET_MEAN"]["context"]["recommendation"]
 
 
+def test_drawdown_beyond_monte_carlo_case_recommends_review():
+    registry = load_registry()
+    target = strategy(registry, "MONDAY_BTCJPY", {"mc_expected_max_dd_pct": 8.5})
+    result = evaluate_edge_decay(target, {
+        "max_dd_pct": 8.7,
+        "rolling_50": {"n_trades": 20},
+    }, [], now=NOW)
+    signal = next(item for item in result["signals"] if item["rule_key"] == "PAUSE_DD_BEYOND_MONTE_CARLO")
+    assert signal["severity"] == "critical"
+    assert signal["context"]["observed_max_dd_pct"] == 8.7
+
+
 def test_wr_pf_expectancy_cost_and_loss_streak_rules_include_sample_size():
     registry = load_registry()
     target = strategy(registry, "MONDAY_BTCJPY", {
