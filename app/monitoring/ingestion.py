@@ -91,6 +91,24 @@ class OrderRejectedEvent(EventPayload):
     ts: datetime | None = Field(default=None, validation_alias=AliasChoices("ts", "timestamp"))
 
 
+class SignalIntentEvent(EventPayload):
+    signal_id: str
+    symbol: str = Field(validation_alias=AliasChoices("symbol", "instrument"))
+    direction: Literal["long", "short"]
+    reference_price: float = Field(gt=0)
+    volume: float = Field(gt=0)
+    timestamp: datetime
+
+
+class ExecutionUpdateEvent(EventPayload):
+    signal_id: str
+    status: Literal["submitted", "filled", "partial", "cancelled", "rejected", "not_sent"]
+    filled_volume: float = Field(default=0, ge=0)
+    fill_price: float | None = Field(default=None, gt=0)
+    reason: str | None = None
+    timestamp: datetime
+
+
 class HeartbeatEvent(EventPayload):
     ts: datetime | None = Field(default=None, validation_alias=AliasChoices("ts", "timestamp"))
 
@@ -108,6 +126,8 @@ EVENT_MODELS: dict[str, type[EventPayload]] = {
     "trade_closed": TradeClosedEvent,
     "health_alert": HealthAlertEvent,
     "order_rejected": OrderRejectedEvent,
+    "signal_intent": SignalIntentEvent,
+    "execution_update": ExecutionUpdateEvent,
     "heartbeat": HeartbeatEvent,
     "alert": FreeAlertEvent,
 }
@@ -414,6 +434,18 @@ def _idempotency_key(event_type: str, payload: dict[str, Any], provided: str | N
             "exit_price": payload.get("exit_price"),
             "profit": payload.get("profit", payload.get("pnl")),
         }
+    elif event_type in {"signal_intent", "execution_update"}:
+        signal_id = payload.get("signal_id")
+        if not signal_id:
+            return None
+        identity = {
+            "strategy_id": external_id,
+            "signal_id": signal_id,
+            "type": event_type,
+        }
+        if event_type == "execution_update":
+            identity["status"] = payload.get("status")
+            identity["ts"] = payload.get("ts", payload.get("timestamp"))
     elif event_type in {"equity", "heartbeat", "bar_update", "health_alert", "order_rejected"}:
         ts = payload.get("ts", payload.get("timestamp"))
         if ts is None:
@@ -437,6 +469,8 @@ def _event_timestamps(event_type: str, payload: dict[str, Any], parsed: EventPay
     if event_type == "trade_closed":
         event = parsed
         return {"entry_time": event.entry_time, "exit_time": event.exit_time}  # type: ignore[attr-defined]
+    if event_type in {"signal_intent", "execution_update"}:
+        return {"ts": parsed.timestamp}  # type: ignore[attr-defined]
     if event_type == "strategy_started":
         timestamp = parsed.start_date  # type: ignore[attr-defined]
     elif event_type == "health_alert":

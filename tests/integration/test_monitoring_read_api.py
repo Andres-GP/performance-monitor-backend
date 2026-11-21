@@ -97,6 +97,22 @@ def test_portfolio_trades_include_member_strategies_and_cost_fields(client, auth
     query.in_.assert_called_once_with("strategy_id", ["MONDAY_BTCJPY", "GOTOBI_USDJPY_AXI", "WEEKLYMOM_ETHUSD"])
 
 
+def test_execution_event_history_is_paginated_and_filtered_to_one_strategy(client, auth_header, monitoring_tables):
+    event = {
+        "id": 9, "strategy_id": "MONDAY_BTCJPY", "event_type": "execution_update",
+        "payload": {"signal_id": "S-1", "status": "partial", "filled_volume": 0.05},
+    }
+    monitoring_tables["event_raw"] = _table([event], count=1)
+
+    response = client.get("/strategies/MONDAY_BTCJPY/execution-events?limit=10", headers=auth_header)
+
+    assert response.status_code == 200
+    assert response.json()["items"] == [event]
+    assert response.json()["total"] == 1
+    query = monitoring_tables["event_raw"].select.return_value
+    query.in_.assert_called_once_with("event_type", ["signal_intent", "execution_update"])
+
+
 def test_equity_filters_and_rejects_reversed_time_range(client, auth_header, monitoring_tables):
     monitoring_tables["equity_sample"] = _table([{"strategy_id": "MONDAY_BTCJPY", "equity": 10100}], count=1)
     response = client.get(

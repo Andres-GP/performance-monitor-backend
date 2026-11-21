@@ -161,6 +161,28 @@ def test_trade_storage_falls_back_until_cost_columns_are_migrated():
     }
 
 
+@pytest.mark.parametrize(("event_type", "payload"), [
+    ("signal_intent", {
+        "strategy_id": "MONDAY_BTCJPY", "signal_id": "S-1", "symbol": "BTCJPY",
+        "direction": "long", "reference_price": 100, "volume": 0.1,
+        "timestamp": "2026-11-20T10:00:00Z",
+    }),
+    ("execution_update", {
+        "strategy_id": "MONDAY_BTCJPY", "signal_id": "S-1", "status": "partial",
+        "filled_volume": 0.05, "fill_price": 100.02,
+        "timestamp": "2026-11-20T10:00:01Z",
+    }),
+])
+def test_signal_and_execution_events_are_normalized_and_retained(event_type, payload, registry_with_offset):
+    repository = MemoryRepository()
+
+    result = ingest_event(event_type, payload, repository, registry_with_offset)
+
+    assert result == {"status": "processed", "strategy_id": "MONDAY_BTCJPY"}
+    assert repository.raw_events[0]["ingest_status"] == "processed"
+    assert repository.raw_events[0]["ts"] is not None
+
+
 def test_trade_event_is_raw_idempotent_normalized_and_calculated(registry_with_offset):
     repository = MemoryRepository()
     repository.equities[("MONDAY_BTCJPY", "2026-11-15T21:59:00+00:00")] = {
@@ -390,6 +412,8 @@ def test_invalid_event_is_retained_as_rejected_raw_payload(registry_with_offset)
         ("trade_closed", {"strategy_id": "MONDAY_BTCJPY", "symbol": "BTCJPY", "entry_time": "2026-11-18T10:00:00Z", "exit_time": "2026-11-18T10:10:00Z", "volume": 0.1, "entry_price": 100, "exit_price": 101, "profit": 10, "type": "long"}),
         ("health_alert", {"strategy_id": "MONDAY_BTCJPY", "type": "LateEntry", "message": "late", "severity": "medium"}),
         ("order_rejected", {"strategy_id": "MONDAY_BTCJPY", "context": "EntryBuy", "retcode": 10030, "description": "rejected"}),
+        ("signal_intent", {"strategy_id": "MONDAY_BTCJPY", "signal_id": "S-1", "symbol": "BTCJPY", "direction": "long", "reference_price": 100, "volume": 0.1, "timestamp": "2026-11-18T10:00:00Z"}),
+        ("execution_update", {"strategy_id": "MONDAY_BTCJPY", "signal_id": "S-1", "status": "filled", "filled_volume": 0.1, "fill_price": 100, "timestamp": "2026-11-18T10:00:01Z"}),
         ("heartbeat", {"strategy_id": "MONDAY_BTCJPY"}),
         ("alert", {"strategy_id": "MONDAY_BTCJPY", "text": "EA started"}),
     ],

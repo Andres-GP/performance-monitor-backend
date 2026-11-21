@@ -453,6 +453,30 @@ def create_app() -> FastAPI:
         query = query.order("exit_time", desc=True)
         return _monitoring_page(query, limit=limit, offset=offset)
 
+    @app.get("/strategies/{strategy_id}/execution-events", dependencies=[Depends(verify_token)])
+    async def read_strategy_execution_events(
+        strategy_id: str,
+        from_: datetime | None = Query(None, alias="from"),
+        to: datetime | None = None,
+        limit: int = Query(100, ge=1, le=500),
+        offset: int = Query(0, ge=0),
+    ):
+        if not any(item.id == strategy_id for item in monitoring_registry.strategies):
+            raise HTTPException(status_code=404, detail="Strategy not found")
+        if from_ and to and from_ > to:
+            raise HTTPException(status_code=422, detail="from must be earlier than or equal to to")
+        query = (
+            supabase.table("event_raw").select("id,strategy_id,event_type,ts,received_at,payload,ingest_status", count="exact")
+            .eq("strategy_id", strategy_id)
+            .in_("event_type", ["signal_intent", "execution_update"])
+        )
+        if from_:
+            query = query.gte("ts", _datetime_filter(from_))
+        if to:
+            query = query.lte("ts", _datetime_filter(to))
+        query = query.order("ts", desc=True)
+        return _monitoring_page(query, limit=limit, offset=offset)
+
     @app.get("/portfolios/{portfolio_id}/correlation", dependencies=[Depends(verify_token)])
     async def read_portfolio_correlation(
         portfolio_id: str,
