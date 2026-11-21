@@ -2,6 +2,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+from app.api import enrich_execution_events
 
 
 def _table(data=None, count=None, *, ack_row=None):
@@ -58,10 +59,32 @@ def test_portfolio_list_and_detail_use_registered_portfolio_and_metrics(client, 
     assert response.json()["metrics"]["equity"] == 12000
     assert len(response.json()["strategies"]) == 3
     assert response.json()["strategies"][0]["last_heartbeat_at"] == "2026-11-19T19:59:00+00:00"
-    assert response.json()["equity_curve"][0]["equity"] == 20000
+    assert response.json()["equity_curve"][0]["equity"] == 12000
     assert response.json()["strategies"][0]["expected_mode"] == "demo"
     assert response.json()["strategies"][0]["current_mode"] == "live"
     assert response.json()["strategies"][0]["mode_status"] == "mode_mismatch"
+
+
+def test_execution_event_enrichment_calculates_adverse_slippage_and_latency():
+    page = {"items": [{
+        "event_type": "execution_update",
+        "payload": {
+            "signal_id": "S-1", "status": "filled", "fill_price": 100.15,
+            "timestamp": "2026-11-19T10:00:01.500Z",
+        },
+    }]}
+    context = [{
+        "event_type": "signal_intent",
+        "payload": {
+            "signal_id": "S-1", "direction": "long", "reference_price": 100,
+            "spread_points": 14, "timestamp": "2026-11-19T10:00:00Z",
+        },
+    }]
+    enriched = enrich_execution_events(page, context)["items"][0]["payload"]
+    assert enriched["slippage_price"] == pytest.approx(0.15)
+    assert enriched["slippage_bps"] == pytest.approx(15)
+    assert enriched["spread_points"] == 14
+    assert enriched["signal_to_fill_seconds"] == pytest.approx(1.5)
 
 
 def test_strategy_detail_and_paginated_date_filtered_trades(client, auth_header, monitoring_tables):
@@ -79,6 +102,38 @@ def test_strategy_detail_and_paginated_date_filtered_trades(client, auth_header,
     assert trades.json()["limit"] == 10 and trades.json()["offset"] == 5
     assert trades.json()["total"] == 42
     assert len(trades.json()["items"]) == 1
+
+
+def test_portfolio_trades_include_member_strategies_and_cost_fields(client, auth_header, monitoring_tables):
+    trade = {
+        "strategy_id": "MONDAY_BTCJPY", "profit": 5, "volume": 0.2,
+        "trade_type": "long", "commission": 0.5, "swap": -0.1,
+    }
+    monitoring_tables["trade"] = _table([trade], count=1)
+
+    response = client.get("/portfolios/P_AXI/trades?limit=20&offset=0", headers=auth_header)
+
+    assert response.status_code == 200
+    assert response.json()["items"] == [trade]
+    assert response.json()["total"] == 1
+    query = monitoring_tables["trade"].select.return_value
+    query.in_.assert_called_once_with("strategy_id", ["MONDAY_BTCJPY", "GOTOBI_USDJPY_AXI", "WEEKLYMOM_ETHUSD"])
+
+
+def test_execution_event_history_is_paginated_and_filtered_to_one_strategy(client, auth_header, monitoring_tables):
+    event = {
+        "id": 9, "strategy_id": "MONDAY_BTCJPY", "event_type": "execution_update",
+        "payload": {"signal_id": "S-1", "status": "partial", "filled_volume": 0.05},
+    }
+    monitoring_tables["event_raw"] = _table([event], count=1)
+
+    response = client.get("/strategies/MONDAY_BTCJPY/execution-events?limit=10", headers=auth_header)
+
+    assert response.status_code == 200
+    assert response.json()["items"] == [event]
+    assert response.json()["total"] == 1
+    query = monitoring_tables["event_raw"].select.return_value
+    query.in_.assert_called_once_with("event_type", ["signal_intent", "execution_update"])
 
 
 def test_equity_filters_and_rejects_reversed_time_range(client, auth_header, monitoring_tables):

@@ -14,7 +14,7 @@ A **backend API** for monitoring trading strategy performance across **MetaTrade
 ## 🚀 Live Endpoints
 
 - **Staging API**: [https://performance-monitor-backend-staging.onrender.com](https://performance-monitor-backend-staging.onrender.com)
-- **Production API**: [https://performance-monitor-backend.onrender.com](https://performance-monitor-backend.onrender.com)
+- **Production API**: [https://performance-monitor-backend-prod.onrender.com](https://performance-monitor-backend-prod.onrender.com)
 - **API Documentation**: `https://your-api.onrender.com/docs` (FastAPI Swagger UI)
 
 ---

@@ -21,6 +21,7 @@ from starlette.concurrency import run_in_threadpool
 from .config import settings
 from .models import StrategyInfo, TradeRecord
 from .monitoring.ingestion import EventValidationError, SupabaseMonitoringRepository, ingest_event
+from .monitoring.derived_metrics import merge_account_equity_samples
 from .monitoring.alert_lifecycle import SupabaseAlertLifecycleRepository, acknowledge_alert
 from .monitoring.strategies import load_registry
 from .monitoring.activity_rules import normalize_mode
@@ -140,6 +141,19 @@ def verify_token(creds: HTTPAuthorizationCredentials = Depends(security)):
     # 3️⃣ Si ninguna funciona, rechazar
     raise HTTPException(status_code=401, detail="Invalid authentication credentials")
 
+
+def latest_position_snapshot(strategy_id: str):
+    """Return the latest position sample when the additive schema is installed."""
+    try:
+        return (
+            supabase.table("position_snapshot").select("*")
+            .eq("strategy_id", strategy_id).limit(1).execute().data or []
+        )
+    except Exception:
+        # Older deployments remain readable until migration 0004 is applied.
+        logger.info("Position snapshot table is not available yet")
+        return []
+
 def parse_datetime(dt_str: str) -> datetime:
     if dt_str.endswith('Z'):
         dt_str = dt_str[:-1] + '+00:00'
@@ -153,6 +167,42 @@ def _monitoring_page(query, *, limit: int, offset: int):
     if not isinstance(total, int):
         total = None
     return {"items": data, "limit": limit, "offset": offset, "total": total}
+
+
+def enrich_execution_events(page: dict, context_rows: list[dict]) -> dict:
+    """Join signal references to fills and calculate observed execution slippage."""
+    intents = {
+        (row.get("payload") or {}).get("signal_id"): row.get("payload") or {}
+        for row in context_rows
+        if row.get("event_type") == "signal_intent" and (row.get("payload") or {}).get("signal_id")
+    }
+    for row in page.get("items", []):
+        payload = row.get("payload") or {}
+        signal_id = payload.get("signal_id")
+        intent = intents.get(signal_id)
+        if not intent:
+            continue
+        if row.get("event_type") == "signal_intent":
+            continue
+        payload.setdefault("symbol", intent.get("symbol"))
+        payload.setdefault("direction", intent.get("direction"))
+        payload.setdefault("reference_price", intent.get("reference_price"))
+        payload.setdefault("spread_points", intent.get("spread_points"))
+        fill_price = payload.get("fill_price")
+        reference_price = intent.get("reference_price")
+        if fill_price is not None and reference_price:
+            direction_sign = 1 if str(intent.get("direction", "long")).lower() == "long" else -1
+            adverse_slippage = (float(fill_price) - float(reference_price)) * direction_sign
+            payload["slippage_price"] = adverse_slippage
+            payload["slippage_bps"] = adverse_slippage / float(reference_price) * 10_000
+        signal_ts = intent.get("timestamp")
+        execution_ts = payload.get("timestamp")
+        if signal_ts and execution_ts:
+            signal_dt = datetime.fromisoformat(str(signal_ts).replace("Z", "+00:00"))
+            execution_dt = datetime.fromisoformat(str(execution_ts).replace("Z", "+00:00"))
+            payload["signal_to_fill_seconds"] = max(0, (execution_dt - signal_dt).total_seconds())
+        row["payload"] = payload
+    return page
 
 
 def _datetime_filter(value: datetime) -> str:
@@ -319,6 +369,7 @@ def create_app() -> FastAPI:
             .in_("status", ["open", "ack"]).order("last_seen", desc=True).limit(100).execute().data or []
         )
         strategies = []
+        position_snapshots = []
         for strategy in monitoring_registry.strategies:
             if strategy.portfolio_id != portfolio_id:
                 continue
@@ -338,6 +389,16 @@ def create_app() -> FastAPI:
                 supabase.table("event_raw").select("payload,received_at").eq("strategy_id", strategy.id)
                 .eq("event_type", "strategy_started").order("received_at", desc=True).limit(1).execute().data or []
             )
+            position_rows = latest_position_snapshot(strategy.id)
+            position_snapshot = position_rows[0] if position_rows else None
+            position_age = None
+            position_fresh = False
+            if position_snapshot and position_snapshot.get("ts"):
+                position_ts = datetime.fromisoformat(position_snapshot["ts"].replace("Z", "+00:00"))
+                position_age = max(0, int((datetime.now(timezone.utc) - position_ts).total_seconds()))
+                position_fresh = position_age <= 180
+                if position_fresh:
+                    position_snapshots.append(position_snapshot)
             start_payload = (starts[0].get("payload") or {}) if starts else {}
             observed_mode = normalize_mode(start_payload.get("mode") or start_payload.get("data_type"))
             alerts.extend(strategy_alerts)
@@ -346,9 +407,14 @@ def create_app() -> FastAPI:
                 "current_mode": observed_mode,
                 "mode_status": "unconfirmed" if observed_mode is None else "matches_expected" if observed_mode == strategy.expected_mode else "mode_mismatch",
                 "mode_observed_at": starts[0].get("received_at") if starts else None,
+                "broker_utc_offset_minutes": start_payload.get("broker_utc_offset_minutes"),
                 "metrics": stats[0] if stats else None,
                 "alerts": strategy_alerts,
                 "last_heartbeat_at": heartbeat[0].get("ts") if heartbeat else None,
+                "positions": (position_snapshot or {}).get("positions", []) if position_fresh else None,
+                "position_snapshot_at": (position_snapshot or {}).get("ts"),
+                "position_snapshot_age_seconds": position_age,
+                "position_state": "fresh" if position_fresh else "stale" if position_snapshot else "unavailable",
             })
         member_ids = [item.id for item in monitoring_registry.strategies if item.portfolio_id == portfolio_id]
         samples = []
@@ -359,30 +425,40 @@ def create_app() -> FastAPI:
                 .gte("ts", (datetime.now(timezone.utc) - timedelta(days=90)).isoformat())
                 .order("ts", desc=True).range(0, 9999).execute().data or []
             )
-        # Build a portfolio curve by summing each strategy's latest sample per minute.
-        # Picking one latest sample globally would mislabel a strategy's equity as portfolio equity.
-        by_strategy_minute = {}
-        for sample in samples:
-            ts = datetime.fromisoformat(sample["ts"].replace("Z", "+00:00"))
-            minute = ts.replace(second=0, microsecond=0).isoformat()
-            key = (sample["strategy_id"], minute)
-            if key not in by_strategy_minute or ts >= by_strategy_minute[key]["ts"]:
-                by_strategy_minute[key] = {"ts": ts, "equity": float(sample["equity"])}
-        by_minute = {}
-        for (_, minute), row in by_strategy_minute.items():
-            aggregate = by_minute.setdefault(minute, {"ts": row["ts"], "equity": 0.0})
-            aggregate["equity"] += row["equity"]
-            aggregate["ts"] = max(aggregate["ts"], row["ts"])
+        # Each EA reports the same account balance; choose the freshest reading
+        # per minute instead of summing the shared balance once per strategy.
+        merged_samples = merge_account_equity_samples([
+            {**sample, "equity": float(sample["equity"])} for sample in samples
+        ])
         equity_curve = [
             {"ts": row["ts"].isoformat(), "equity": row["equity"]}
-            for row in sorted(by_minute.values(), key=lambda value: value["ts"])
+            for row in merged_samples
         ]
+        latest_account_snapshot = max(position_snapshots, key=lambda item: item.get("ts", ""), default=None)
+        open_positions = [
+            position
+            for snapshot in position_snapshots
+            for position in (snapshot.get("positions") or [])
+        ]
+        stop_risk_values = [position.get("risk_at_stop") for position in open_positions]
+        stop_risk_complete = all(value is not None for value in stop_risk_values)
         return {
             "portfolio": portfolio.model_dump(mode="json"),
             "metrics": latest[0] if latest else None,
             "strategies": strategies,
             "alerts": alerts,
             "equity_curve": equity_curve,
+            "position_state": {
+                "status": "fresh" if latest_account_snapshot else "unavailable",
+                "open_positions_count": len(open_positions) if latest_account_snapshot else None,
+                "floating_pnl": sum(float(position.get("profit") or 0) + float(position.get("swap") or 0) for position in open_positions) if latest_account_snapshot else None,
+                "risk_at_stop": sum(float(value) for value in stop_risk_values) if latest_account_snapshot and stop_risk_complete else None,
+                "stop_risk_complete": bool(latest_account_snapshot and stop_risk_complete),
+                "margin_used": latest_account_snapshot.get("margin_used") if latest_account_snapshot else None,
+                "free_margin": latest_account_snapshot.get("free_margin") if latest_account_snapshot else None,
+                "currency": latest_account_snapshot.get("currency") if latest_account_snapshot else None,
+                "snapshot_at": latest_account_snapshot.get("ts") if latest_account_snapshot else None,
+            },
         }
 
     @app.get("/strategies/{strategy_id}", dependencies=[Depends(verify_token)])
@@ -398,10 +474,22 @@ def create_app() -> FastAPI:
             supabase.table("alert").select("*").eq("strategy_id", strategy_id)
             .in_("status", ["open", "ack"]).order("last_seen", desc=True).limit(100).execute().data or []
         )
+        position_rows = latest_position_snapshot(strategy_id)
+        position_snapshot = position_rows[0] if position_rows else None
+        if position_snapshot and position_snapshot.get("ts"):
+            position_ts = datetime.fromisoformat(position_snapshot["ts"].replace("Z", "+00:00"))
+            position_age = max(0, int((datetime.now(timezone.utc) - position_ts).total_seconds()))
+        else:
+            position_age = None
+        positions_fresh = position_age is not None and position_age <= 180
         return {
             "strategy": strategy.model_dump(mode="json"),
             "metrics": stats[0] if stats else None,
             "alerts": alerts,
+            "positions": (position_snapshot or {}).get("positions", []) if positions_fresh else None,
+            "position_snapshot_at": (position_snapshot or {}).get("ts"),
+            "position_snapshot_age_seconds": position_age,
+            "position_state": "fresh" if positions_fresh else "stale" if position_snapshot else "unavailable",
         }
 
     @app.get("/strategies/{strategy_id}/equity", dependencies=[Depends(verify_token)])
@@ -417,6 +505,65 @@ def create_app() -> FastAPI:
         if from_ and to and from_ > to:
             raise HTTPException(status_code=422, detail="from must be earlier than or equal to to")
         query = supabase.table("equity_sample").select("*", count="exact").eq("strategy_id", strategy_id)
+        if from_:
+            query = query.gte("ts", _datetime_filter(from_))
+        if to:
+            query = query.lte("ts", _datetime_filter(to))
+        query = query.order("ts", desc=True)
+        page = _monitoring_page(query, limit=limit, offset=offset)
+        context_rows = (
+            supabase.table("event_raw").select("event_type,payload")
+            .eq("strategy_id", strategy_id).eq("event_type", "signal_intent")
+            .order("ts", desc=True).range(0, 4999).execute().data or []
+        )
+        return enrich_execution_events(page, context_rows)
+
+    @app.get("/portfolios/{portfolio_id}/trades", dependencies=[Depends(verify_token)])
+    async def read_portfolio_trades(
+        portfolio_id: str,
+        from_: datetime | None = Query(None, alias="from"),
+        to: datetime | None = None,
+        limit: int = Query(100, ge=1, le=500),
+        offset: int = Query(0, ge=0),
+    ):
+        if not any(item.id == portfolio_id for item in monitoring_registry.portfolios):
+            raise HTTPException(status_code=404, detail="Portfolio not found")
+        if from_ and to and from_ > to:
+            raise HTTPException(status_code=422, detail="from must be earlier than or equal to to")
+        strategy_ids = [
+            item.id for item in monitoring_registry.strategies
+            if item.portfolio_id == portfolio_id
+        ]
+        if not strategy_ids:
+            return {"items": [], "limit": limit, "offset": offset, "total": 0}
+        query = (
+            supabase.table("trade").select("*", count="exact")
+            .in_("strategy_id", strategy_ids)
+        )
+        if from_:
+            query = query.gte("exit_time", _datetime_filter(from_))
+        if to:
+            query = query.lte("exit_time", _datetime_filter(to))
+        query = query.order("exit_time", desc=True)
+        return _monitoring_page(query, limit=limit, offset=offset)
+
+    @app.get("/strategies/{strategy_id}/execution-events", dependencies=[Depends(verify_token)])
+    async def read_strategy_execution_events(
+        strategy_id: str,
+        from_: datetime | None = Query(None, alias="from"),
+        to: datetime | None = None,
+        limit: int = Query(100, ge=1, le=500),
+        offset: int = Query(0, ge=0),
+    ):
+        if not any(item.id == strategy_id for item in monitoring_registry.strategies):
+            raise HTTPException(status_code=404, detail="Strategy not found")
+        if from_ and to and from_ > to:
+            raise HTTPException(status_code=422, detail="from must be earlier than or equal to to")
+        query = (
+            supabase.table("event_raw").select("id,strategy_id,event_type,ts,received_at,payload,ingest_status", count="exact")
+            .eq("strategy_id", strategy_id)
+            .in_("event_type", ["signal_intent", "execution_update"])
+        )
         if from_:
             query = query.gte("ts", _datetime_filter(from_))
         if to:

@@ -6,6 +6,7 @@ from app.monitoring.derived_metrics import (
     calculate_portfolio_metrics,
     calculate_strategy_metrics,
     calculate_trade_metrics,
+    merge_account_equity_samples,
     recalculate_monitoring_metrics,
     server_daily_close_utc,
 )
@@ -52,6 +53,9 @@ def test_trade_metrics_match_hand_calculated_series():
     metrics = calculate_trade_metrics(trades)
     assert metrics == {
         "trade_count": 5,
+        "net_profit": 100,
+        "average_net_per_trade": 20,
+        "t_stat_net_per_trade": pytest.approx(20 / (16750 / 20) ** 0.5),
         "win_rate": 40.0,
         "profit_factor": pytest.approx(175 / 75),
         "expectancy_pct": 2.0,
@@ -65,6 +69,13 @@ def test_trade_metrics_match_hand_calculated_series():
     )
     assert strategy["rolling_20"]["n_trades"] == 5
     assert strategy["rolling_50"]["profit_factor"] == pytest.approx(175 / 75)
+
+
+def test_no_trades_are_reported_as_no_sample_for_loss_streak():
+    metrics = calculate_trade_metrics([])
+    assert metrics["current_loss_streak"] is None
+    assert metrics["max_loss_streak"] is None
+    assert metrics["t_stat_net_per_trade"] is None
 
 
 def test_strategy_drawdown_and_pnl_ignore_suspected_cashflow():
@@ -108,7 +119,20 @@ def test_daily_dd_is_disabled_until_server_offset_is_verified():
     assert metrics["equity"] == 100
     assert metrics["total_dd_pct"] == 0
     assert metrics["daily_dd_pct"] is None
-    assert metrics["server_date"] is None
+    assert metrics["server_date"].isoformat() == "2026-01-02"
+
+
+def test_utc_metrics_are_persisted_before_broker_day_is_calibrated():
+    repository = MemoryMetricsRepository()
+    repository.equities["MONDAY_BTCJPY"] = [{
+        "ts": "2026-01-02T00:00:00Z", "equity": 10000,
+    }]
+    as_of = datetime(2026, 1, 2, 1, tzinfo=timezone.utc)
+    result = recalculate_monitoring_metrics(repository, load_registry(), as_of=as_of)
+    monday = result["strategies"]["MONDAY_BTCJPY"]
+    assert monday["server_date"].isoformat() == "2026-01-02"
+    assert monday["daily_dd_pct"] is None
+    assert any(row.get("strategy_id") == "MONDAY_BTCJPY" for row in repository.daily_stats)
 
 
 def test_portfolio_uses_freshest_account_equity_instead_of_summing_ea_reports():
@@ -130,16 +154,27 @@ def test_portfolio_uses_freshest_account_equity_instead_of_summing_ea_reports():
     assert metrics["peak_equity"] == 112
 
 
-def test_recalculation_persists_daily_rows_only_for_verified_offsets():
+def test_account_equity_samples_are_not_multiplied_by_strategy_count():
+    merged = merge_account_equity_samples([
+        {"strategy_id": "A", "ts": "2026-01-01T00:00:10Z", "equity": 100},
+        {"strategy_id": "B", "ts": "2026-01-01T00:00:40Z", "equity": 101},
+        {"strategy_id": "A", "ts": "2026-01-01T00:01:10Z", "equity": 102},
+    ])
+    assert [sample["equity"] for sample in merged] == [101, 102]
+
+
+def test_recalculation_persists_utc_rows_but_only_computes_daily_dd_for_verified_offsets():
     repository = MemoryMetricsRepository()
     registry = load_registry()
     as_of = datetime(2026, 11, 19, 12, tzinfo=timezone.utc)
     result = recalculate_monitoring_metrics(repository, registry, as_of=as_of)
     assert len(result["strategies"]) == 5
     assert len(result["portfolios"]) == 2
-    assert repository.daily_stats == []
+    assert len(repository.daily_stats) == 7
+    assert all(record["daily_dd_pct"] is None for record in repository.daily_stats)
 
     verified_registry = registry_with_offsets()
+    repository.daily_stats.clear()
     result = recalculate_monitoring_metrics(repository, verified_registry, as_of=as_of)
     assert len(repository.daily_stats) == 7
     assert all(record["server_date"] == "2026-11-19" for record in repository.daily_stats)

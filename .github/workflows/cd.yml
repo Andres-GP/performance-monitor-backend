@@ -63,7 +63,7 @@ jobs:
         run: |
           # Obtener la URL del servicio según la rama
           if [ "${{ github.ref_name }}" == "main" ]; then
-            URL="https://performance-monitor-backend.onrender.com/health"
+            URL="https://performance-monitor-backend-prod.onrender.com/health"
           elif [ "${{ github.ref_name }}" == "staging" ]; then
             URL="https://performance-monitor-backend-staging.onrender.com/health"
           else
@@ -72,14 +72,23 @@ jobs:
 
           for i in {1..10}; do
             if curl -f -s -o /dev/null "$URL"; then
-              echo "✅ Service is healthy"
-              exit 0
+              echo "✅ Service health endpoint is healthy"
+              break
             fi
             echo "Waiting for service to be ready... ($i/10)"
             sleep 5
           done
-          echo "❌ Service not ready after 50 seconds"
-          exit 1
+          if ! curl -f -s -o /dev/null "$URL"; then
+            echo "❌ Service not ready after 50 seconds"
+            exit 1
+          fi
+
+          SCHEMA_URL="${URL%/health}/openapi.json"
+          if ! curl -fsS "$SCHEMA_URL" | jq -e '.paths | has("/portfolios") and has("/monitor/events")' >/dev/null; then
+            echo "❌ Monitoring API contract is missing /portfolios or /monitor/events"
+            exit 1
+          fi
+          echo "✅ Monitoring API routes are present"
 
       - name: Notify deployment status
         if: always()
