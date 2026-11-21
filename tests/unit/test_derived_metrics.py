@@ -52,6 +52,9 @@ def test_trade_metrics_match_hand_calculated_series():
     metrics = calculate_trade_metrics(trades)
     assert metrics == {
         "trade_count": 5,
+        "net_profit": 100,
+        "average_net_per_trade": 20,
+        "t_stat_net_per_trade": pytest.approx(20 / (16750 / 20) ** 0.5),
         "win_rate": 40.0,
         "profit_factor": pytest.approx(175 / 75),
         "expectancy_pct": 2.0,

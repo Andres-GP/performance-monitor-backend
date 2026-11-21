@@ -76,13 +76,30 @@ def evaluate_edge_decay(
             })
 
     baseline_cost = strategy.baselines.bt_cost_ratio
-    cost_rows = [trade for trade in trades[-window:] if trade.get("swap_estimate") is not None and trade.get("commission") is not None]
+    cost_rows = [
+        trade for trade in trades[-window:]
+        if any(trade.get(field) is not None for field in ("swap", "swap_estimate", "commission", "spread_cost"))
+    ]
     if baseline_cost is not None and cost_rows:
-        gross_wins = [float(row["profit"]) - float(row.get("commission", 0)) for row in cost_rows]
+        # MT5's normalized `profit` is already net of broker costs. Add known
+        # costs back to estimate gross positive P&L; never require the legacy
+        # `swap_estimate` field, which the EA contract does not send.
+        gross_wins = [
+            float(row["profit"])
+            + abs(float(row.get("commission") or 0))
+            + abs(float(row.get("swap", row.get("swap_estimate")) or 0))
+            + abs(float(row.get("spread_cost") or 0))
+            for row in cost_rows
+        ]
         positive_gross = [value for value in gross_wins if value > 0]
         if positive_gross:
             average_gross = sum(positive_gross) / len(positive_gross)
-            average_cost = sum(abs(float(row["commission"])) + abs(float(row["swap_estimate"])) for row in cost_rows) / len(cost_rows)
+            average_cost = sum(
+                abs(float(row.get("commission") or 0))
+                + abs(float(row.get("swap", row.get("swap_estimate")) or 0))
+                + abs(float(row.get("spread_cost") or 0))
+                for row in cost_rows
+            ) / len(cost_rows)
             live_cost_ratio = average_cost / average_gross
             if live_cost_ratio > 2 * baseline_cost:
                 add("COST_DRIFT", "medium", {

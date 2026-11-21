@@ -201,6 +201,14 @@ def calculate_trade_metrics(trades: list[dict[str, Any]]) -> dict[str, Any]:
     gross_profit = sum(profit for profit in profits if profit > 0)
     gross_loss = -sum(profit for profit in profits if profit < 0)
     profit_factor = gross_profit / gross_loss if gross_loss > 0 else None
+    average_net_per_trade = sum(profits) / len(profits) if profits else None
+    if len(profits) >= 2:
+        mean_profit = average_net_per_trade
+        variance = sum((profit - mean_profit) ** 2 for profit in profits) / (len(profits) - 1)
+        standard_error = (variance / len(profits)) ** 0.5
+        t_stat_net_per_trade = mean_profit / standard_error if standard_error > 0 else None
+    else:
+        t_stat_net_per_trade = None
     holds = [float(trade["hold_minutes"]) for trade in ordered if trade.get("hold_minutes") is not None]
     expectancy_values = [
         float(trade["pnl_pct_equity"])
@@ -217,6 +225,9 @@ def calculate_trade_metrics(trades: list[dict[str, Any]]) -> dict[str, Any]:
             current_loss_streak = 0
     return {
         "trade_count": len(ordered),
+        "net_profit": sum(profits) if profits else None,
+        "average_net_per_trade": average_net_per_trade,
+        "t_stat_net_per_trade": t_stat_net_per_trade,
         "win_rate": wins / len(ordered) * 100 if ordered else None,
         "profit_factor": profit_factor,
         "expectancy_pct": sum(expectancy_values) / len(expectancy_values) if expectancy_values else None,

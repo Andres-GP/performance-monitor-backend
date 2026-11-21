@@ -49,7 +49,7 @@ def test_wr_pf_expectancy_cost_and_loss_streak_rules_include_sample_size():
         "exit_time": NOW - timedelta(days=day),
         "profit": 4,
         "commission": -1,
-        "swap_estimate": -1,
+        "swap": -1,
     } for day in range(20)]
     result = evaluate_edge_decay(target, {
         "rolling_50": {
