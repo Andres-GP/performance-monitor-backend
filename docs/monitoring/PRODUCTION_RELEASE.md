@@ -19,6 +19,7 @@
 1. Mantener la URL canónica `https://performance-monitor-backend-prod.onrender.com` en frontend, EAs y health check de despliegue.
 2. Verificar que cada nuevo release de producción conserve `GET /portfolios` y `POST /monitor/events`.
 3. Aplicar, en orden, las migraciones `0001_monitoring_core.up.sql` a `0004_position_snapshots.up.sql` a la base de producción antes de consumir los campos ampliados.
+   Los resúmenes se guardan por fecha UTC desde el primer evento; el DD diario y las reglas de límite diario permanecen sin muestra hasta verificar el offset real del broker.
 4. Verificar `/health`, `POST /heartbeat`, `POST /monitor/events` y las lecturas autenticadas `/portfolios`, `/alerts` y `/capital/summary` directamente contra el host canónico.
 5. Añadir ese host a la lista de URLs permitidas en WebRequest en cada terminal MetaTrader. El error MT5 `4014` sucede antes de que el backend pueda responder.
 6. Después de validar el servicio, ejecutar la tarea pendiente de [QUEUE.md](QUEUE.md) en los EAs.

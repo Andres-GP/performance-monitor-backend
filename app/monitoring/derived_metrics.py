@@ -129,7 +129,7 @@ def _equity_summary(
             "total_dd_pct": None,
             "max_dd_pct": None,
             "pnl": None,
-            "server_date": server_date,
+            "server_date": server_date or as_of.date(),
             "_day_start_equity": None,
         }
 
@@ -154,7 +154,10 @@ def _equity_summary(
             "total_dd_pct": total_dd_pct,
             "max_dd_pct": max_dd_pct,
             "pnl": None,
-            "server_date": None,
+            # UTC is an explicit, trustworthy day boundary for new EA events.
+            # Persist summaries under UTC dates while leaving daily DD disabled
+            # until the broker-server offset is verified.
+            "server_date": as_of.date(),
             "_day_start_equity": None,
         }
 
