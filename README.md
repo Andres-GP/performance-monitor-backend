@@ -9,6 +9,8 @@
 
 A **backend API** for monitoring trading strategy performance across **MetaTrader 5 (MT5)** and **NinjaTrader 8 (NT8)** platforms. Built with **FastAPI**, **Supabase**, and **WebSockets**, it provides trade ingestion, performance analytics, health monitoring, and alerts. Availability of individual metrics depends on the events and baseline data supplied by the connected EAs and broker.
 
+Before pushing from a local clone, run `sh scripts/install-git-hooks.sh`. The pre-push hook requires the full pytest suite to pass. GitHub Actions also runs the test matrix on pushes and pull requests; deployments to Render wait for the full test suite and critical lint checks to pass.
+
 ---
 
 ## 🚀 Live Endpoints
