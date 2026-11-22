@@ -18,7 +18,41 @@ on:
           - production
 
 jobs:
+  quality-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pytest-cov pytest-asyncio pytest-mock flake8
+
+      - name: Run critical lint checks
+        run: flake8 app/ tests/ --count --select=E9,F63,F7,F82 --show-source --statistics
+
+      - name: Run full test suite
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          API_SECRET_KEY: ${{ secrets.API_SECRET_KEY }}
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          RESEND_FROM_EMAIL: ${{ secrets.RESEND_FROM_EMAIL || 'onboarding@resend.dev' }}
+          ALERT_EMAIL_TO: ${{ secrets.ALERT_EMAIL_TO }}
+          CLERK_JWKS_URL: ${{ secrets.CLERK_JWKS_URL || 'https://healthy-honeybee-66.clerk.accounts.dev/.well-known/jwks.json' }}
+          CLERK_ISSUER: ${{ secrets.CLERK_ISSUER || 'https://healthy-honeybee-66.clerk.accounts.dev' }}
+        run: pytest --cov=app --cov-report=xml --cov-report=term
+
   deploy:
+    needs: quality-gate
     runs-on: ubuntu-latest
     environment:
       name: ${{ github.ref_name == 'main' && 'production' || github.ref_name == 'staging' && 'staging' || 'development' }}
